@@ -1,0 +1,13 @@
+Package: ksef-cert-verify
+Version: @VERSION@
+Section: utils
+Priority: optional
+Architecture: amd64
+Maintainer: KSeF-cert-verify contributors <noreply@example.invalid>
+Installed-Size: @SIZE@
+Depends: libc6 (>= @GLIBC@), libegl1, libgl1, libxkbcommon0, libxkbcommon-x11-0, libxcb-cursor0, libxcb-icccm4, libxcb-image0, libxcb-keysyms1, libxcb-randr0, libxcb-render-util0, libxcb-shape0, libxcb-xinerama0, libxcb-xkb1, libfontconfig1, libdbus-1-3, libglib2.0-0t64 | libglib2.0-0
+Description: KSeF CertVerify – Weryfikacja certyfikatów KSeF (CLI i GUI)
+ KSeF CertVerify sprawdza certyfikat KSeF (Authentication / Offline) razem z zaszyfrowanym
+ kluczem prywatnym: daty, łańcuch zaufania (CA podane przez użytkownika),
+ profil KSeF oraz zgodność pary klucz publiczny/prywatny. Działa offline.
+ Wynik lokalny nie oznacza aktywnego statusu certyfikatu w KSeF.

@@ -1,0 +1,18 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="168" height="36" viewBox="0 0 240 52" role="img" aria-label="Postaw mi kawę">
+  <style>
+    .pill { fill:#FFF8F0; stroke:#E6CFB4; stroke-width:2; }
+    .cup { fill:none; stroke:#8B5A2B; stroke-width:2.6; stroke-linecap:round; stroke-linejoin:round; }
+    .cupfill { fill:#8B5A2B; fill-opacity:.18; }
+    .label { fill:#5A3A1A; font-family:'Segoe UI Variable Display','Segoe UI','Noto Sans','Cantarell',sans-serif; font-size:20px; font-weight:600; }
+    @media (prefers-color-scheme: dark) {
+      .pill { fill:#241A12; stroke:#4A3724; }
+      .cup { stroke:#D9A66B; }
+      .cupfill { fill:#D9A66B; }
+      .label { fill:#F0DDC4; }
+    }
+  </style>
+  <rect class="pill" x="1" y="1" width="238" height="50" rx="25"/>
+  <path class="cup cupfill" d="M17 24h20v8a10 10 0 0 1-10 10h0a10 10 0 0 1-10-10z"/>
+  <path class="cup" d="M37 27h3a4.5 4.5 0 0 1 0 9h-4M22 10c-2 3 2 4 0 8M30 10c-2 3 2 4 0 8M14 44h26"/>
+  <text class="label" x="58" y="33">Postaw mi kawę</text>
+</svg>

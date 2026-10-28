@@ -1,0 +1,81 @@
+name: CI
+
+# Standardowe CI: jakość kodu, bezpieczeństwo, testy. NIE buduje wydań i niczego nie publikuje.
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions: {}
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  PYTHONUTF8: "1"
+
+jobs:
+  quality:
+    name: jakość i bezpieczeństwo
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.12"
+      - run: pip install -e ".[dev]" pip-audit bandit detect-secrets zizmor
+      - name: Ruff (lint)
+        run: ruff check src tests scripts
+      - name: Ruff (format)
+        run: ruff format --check src tests scripts
+      - name: mypy
+        run: mypy src
+      - name: Bandit
+        run: bandit -q -c pyproject.toml -r src
+      - name: pip-audit (zależności)
+        run: pip-audit --progress-spinner off
+      - name: Skan sekretów (detect-secrets, baza zatwierdzonych atrap)
+        run: |
+          git ls-files -z | xargs -0 detect-secrets-hook --baseline .secrets.baseline
+      - name: Analiza konfiguracji GitHub Actions (zizmor)
+        run: zizmor --offline --min-severity medium .github/workflows
+
+  test:
+    name: test (${{ matrix.os }}, py${{ matrix.python }})
+    needs: quality
+    runs-on: ${{ matrix.os }}
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, windows-2025]
+        python: ["3.11", "3.12", "3.13"]
+    env:
+      QT_QPA_PLATFORM: offscreen
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Biblioteki systemowe dla Qt (Linux, headless)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libegl1 libgl1 libxkbcommon0 libxkbcommon-x11-0 libxcb-cursor0 libxcb-icccm4 libxcb-image0 libxcb-keysyms1 libxcb-randr0 libxcb-render-util0 libxcb-shape0 libxcb-xinerama0 libxcb-xkb1 libfontconfig1 libdbus-1-3 libglib2.0-0 libgssapi-krb5-2
+      - run: pip install -e ".[dev]"
+      # -rs wypisuje powody pominięć; pominięte testy NIE są liczone jako zaliczone.
+      - name: Testy (unit, integration, E2E CLI, GUI)
+        run: pytest -rs --junitxml=junit.xml
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always()
+        with:
+          name: junit-${{ matrix.os }}-py${{ matrix.python }}
+          path: junit.xml

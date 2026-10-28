@@ -1,0 +1,30 @@
+.venv/
+.idea/
+__pycache__/
+*.egg-info/
+build/
+dist/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.claude/
+.mcp.json
+
+# Zabezpieczenie przed przypadkowym zacommitowaniem sekretów i artefaktów
+.env
+.env.*
+*.key
+*.p12
+*.pfx
+*.jwt
+*.secret
+secrets.*
+history.patch
+/fixtures/
+
+# Materiały robocze i audytowe – tylko lokalnie, nigdy w repozytorium
+/.local/
+/docs/audit/
+*.log
+*.patch
+*.bundle
