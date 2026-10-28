@@ -1,0 +1,84 @@
+name: Release
+
+# Publikacja jest ODDZIELONA od CI: uruchamia się tylko dla tagu v* (lub ręcznie), wymaga zielonego CI dla dokładnie
+# tego commita, ponownie buduje i testuje wszystkie pakiety i tworzy WYŁĄCZNIE wersję roboczą (draft) po zatwierdzeniu
+# środowiska "release". Workflow niczego nie publikuje ani nie zmienia widoczności repozytorium.
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag wydania (np. v1.0.0) – musi już istnieć"
+        required: true
+
+permissions: {}
+
+jobs:
+  gate:
+    name: bramka (commit z main + zielone CI)
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      actions: read
+    outputs:
+      sha: ${{ steps.sha.outputs.sha }}
+      tag: ${{ steps.sha.outputs.tag }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+          ref: ${{ github.event.inputs.tag || github.ref }}
+      - name: Ręczne uruchomienie tylko z gałęzi main
+        if: github.event_name == 'workflow_dispatch' && github.ref != 'refs/heads/main'
+        run: |
+          echo "Ręczne wydanie wolno uruchomić wyłącznie z gałęzi main"
+          exit 1
+      - name: Walidacja tagu i pochodzenia commita
+        id: sha
+        env:
+          TAG: ${{ github.event.inputs.tag || github.ref_name }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$ ]] || { echo "Niepoprawny tag: $TAG"; exit 1; }
+          SHA="$(git rev-parse HEAD)"
+          git merge-base --is-ancestor "$SHA" origin/main || { echo "Commit $SHA nie należy do main – wydanie odrzucone"; exit 1; }
+          VERSION="$(python3 -c 'import sys; sys.path.insert(0,"src"); from ksef_cert_verify import __version__ as v; print(v)')"
+          [ "v$VERSION" = "${TAG%%-*}" ] || { echo "Tag $TAG nie zgadza się z wersją pakietu $VERSION"; exit 1; }
+          OK="$(gh api "repos/$GITHUB_REPOSITORY/actions/workflows/ci.yml/runs?head_sha=$SHA&status=success" --jq '.total_count')"
+          [ "$OK" -ge 1 ] || { echo "Brak zielonego przebiegu CI dla $SHA – wydanie z nieprzetestowanego commita odrzucone"; exit 1; }
+          echo "sha=$SHA" >> "$GITHUB_OUTPUT"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+
+  build:
+    needs: gate
+    permissions:
+      contents: read
+    uses: ./.github/workflows/build.yml
+    with:
+      ref: ${{ needs.gate.outputs.sha }}   # budujemy DOKŁADNIE ten commit, który zwalidowała bramka
+
+  publish-draft:
+    name: wersja robocza (po zatwierdzeniu)
+    needs: [gate, build]
+    runs-on: ubuntu-24.04
+    environment: release          # wymagani recenzenci – publikacja tylko po zatwierdzeniu
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: release-files
+          path: dist
+      - name: Weryfikacja sum SHA-256
+        run: cd dist && sha256sum -c SHA256SUMS
+      - name: Wersja robocza GitHub Release (gh CLI)
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.gate.outputs.tag }}
+          SHA: ${{ needs.gate.outputs.sha }}
+        run: |
+          gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --draft --target "$SHA" \
+            --title "KSeF CertVerify $TAG" \
+            --notes "Setup = instalator (menu Start, odinstalowanie). Portable = jeden plik EXE, uruchamiany bez instalacji. SHA-256: SHA256SUMS." dist/*

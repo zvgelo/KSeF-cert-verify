@@ -1,0 +1,13 @@
+[Desktop Entry]
+Type=Application
+Version=1.0
+Name=KSeF CertVerify
+GenericName=Weryfikacja certyfikatów KSeF
+Comment=KSeF CertVerify – weryfikacja certyfikatów KSeF razem z kluczem prywatnym
+Comment[pl]=KSeF CertVerify – weryfikacja certyfikatów KSeF razem z kluczem prywatnym
+Exec=ksef-cert-verify-gui
+Icon=ksef-cert-verify
+Terminal=false
+Categories=Utility;Security;
+Keywords=KSeF;CertVerify;certyfikat;certificate;X.509;
+StartupWMClass=KSeF CertVerify

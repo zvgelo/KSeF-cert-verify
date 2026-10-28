@@ -1,0 +1,71 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ksef-cert-verify"
+dynamic = ["version"]
+description = "Weryfikacja certyfikatów KSeF 2.0 (Authentication / Offline) – CLI i GUI"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+dependencies = [
+    "cryptography>=43",
+    "typer>=0.12",
+    "rich>=13",
+    "httpx>=0.27",
+    "lxml>=5",
+]
+
+[project.urls]
+Repository = "https://github.com/zvgelo/KSeF-cert-verify"
+Homepage = "https://github.com/zvgelo/KSeF-cert-verify"
+
+[project.optional-dependencies]
+gui = ["PySide6>=6.6"]
+dev = ["pytest>=8", "pytest-qt>=4.4", "ruff", "mypy", "pyinstaller>=6", "PySide6>=6.6", "signxml>=3.2"]
+
+[project.scripts]
+ksef-cert-verify = "ksef_cert_verify.cli:main"
+
+[project.gui-scripts]
+ksef-cert-verify-gui = "ksef_cert_verify.gui.main:main"
+
+[tool.setuptools.dynamic]
+version = { attr = "ksef_cert_verify.__version__" }
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+ksef_cert_verify = ["gui/assets/*", "gui/assets/icons/*.svg"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra"
+markers = [
+    "simulated: fixtury generowane lokalnie – NIE są certyfikatami KSeF ani dowodem zgodności z MF",
+    "gui: testy interfejsu Qt (wymagają PySide6; headless: QT_QPA_PLATFORM=offscreen)",
+    "e2e: uruchamia program jako osobny proces",
+    "live_api: kontrolowane testy na prawdziwym API TEST (domyślnie pomijane)",
+]
+
+[tool.ruff]
+line-length = 110
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+ignore = ["E501", "B905", "UP042"]
+
+[tool.mypy]
+python_version = "3.11"
+strict = false
+warn_unused_ignores = true
+ignore_missing_imports = true
+
+[tool.bandit]
+# B105/B107 (podejrzenie zaszytego hasła) trafiają wyłącznie w nazwy kolorów/statusów/zmiennych środowiskowych
+# (fałszywe alarmy); prawdziwe sekrety kontroluje skan sekretów (detect-secrets/gitleaks) i testy.
+skips = ["B105", "B107"]
+exclude_dirs = ["tests"]

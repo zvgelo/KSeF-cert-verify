@@ -1,0 +1,8 @@
+#!/bin/sh
+# Bez argumentów uruchamia GUI; z argumentami – CLI (verify, inspect, gui, --version, --help...).
+HERE="$(dirname "$(readlink -f "$0")")"
+APP="$HERE/usr/lib/ksef-cert-verify"
+if [ "$#" -eq 0 ]; then
+    exec "$APP/ksef-cert-verify-gui"
+fi
+exec "$APP/ksef-cert-verify" "$@"

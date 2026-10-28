@@ -1,0 +1,40 @@
+{
+  "source": "CIRFMF/ksef-api open-api.json, version v2 (API 2.9.0 TE)",
+  "servers": [
+    "https://api-test.ksef.mf.gov.pl/v2",
+    "https://api-demo.ksef.mf.gov.pl/v2",
+    "https://api.ksef.mf.gov.pl/v2"
+  ],
+  "endpoints": {
+    "/auth/challenge": {
+      "post": {
+        "summary": "Inicjalizacja uwierzytelnienia",
+        "secured": false
+      }
+    },
+    "/auth/xades-signature": {
+      "post": {
+        "summary": "Uwierzytelnienie z wykorzystaniem podpisu XAdES",
+        "secured": false
+      }
+    },
+    "/auth/{referenceNumber}": {
+      "get": {
+        "summary": "Pobranie statusu uwierzytelniania",
+        "secured": true
+      }
+    },
+    "/auth/token/redeem": {
+      "post": {
+        "summary": "Pobranie tokenów dostępowych",
+        "secured": true
+      }
+    },
+    "/certificates/query": {
+      "post": {
+        "summary": "Pobranie listy metadanych certyfikatów",
+        "secured": true
+      }
+    }
+  }
+}
