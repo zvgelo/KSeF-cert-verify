@@ -38,7 +38,7 @@ if ($OldSetup) {
     Check ($o.ExitCode -eq 0) "stara wersja: instalacja (exit $($o.ExitCode))"
     $oldVer = (& "$app\ksef-cert-verify.exe" --version) -join ""
     Write-Host "Stara wersja: $oldVer"
-    Check ((Uninstall-Entries).Count -eq 1) "stara wersja: jeden wpis na liście programów"
+    Check (@(Uninstall-Entries).Count -eq 1) "stara wersja: jeden wpis na liście programów"
     # plik spoza nowej wersji: musi zniknąć po aktualizacji (czyszczenie pozostałości)
     New-Item -ItemType Directory -Force "$app\_internal" | Out-Null
     Set-Content "$app\_internal\stale_from_old_version.txt" "stary plik"
@@ -58,7 +58,7 @@ if ($OldSetup) {
     Check ($newVer -ne $oldVer) "aktualizacja: wersja CLI zmieniona ($oldVer -> $newVer)"
     Check (-not (Test-Path "$app\_internal\stale_from_old_version.txt")) "aktualizacja: usunięto pozostałości po starej wersji"
     Check (Test-Path "$app\ksef-cert-verify-user-marker.txt") "aktualizacja: plik użytkownika nietknięty"
-    Check ((Uninstall-Entries).Count -eq 1) "aktualizacja: dokładnie jeden wpis na liście programów"
+    Check (@(Uninstall-Entries).Count -eq 1) "aktualizacja: dokładnie jeden wpis na liście programów"
     Check (@(Get-ChildItem (Split-Path $lnkStart) -Filter "KSeF CertVerify*.lnk").Count -eq 1) "aktualizacja: jeden skrót w menu Start"
     $guiVer = (Get-Item "$app\ksef-cert-verify-gui.exe").VersionInfo.ProductVersion
     Check ($newVer -eq "ksef-cert-verify $guiVer") "wersja GUI (metadane EXE) = wersja CLI ($guiVer)"
@@ -96,7 +96,7 @@ $userPath = [Environment]::GetEnvironmentVariable("Path", "User")
 Check (-not ($userPath -split ";" -contains $app)) "wpis PATH usunięty"
 
 if ($OldSetup) {
-    Check ((Uninstall-Entries).Count -eq 0) "po odinstalowaniu: brak wpisu na liście programów"
+    Check (@(Uninstall-Entries).Count -eq 0) "po odinstalowaniu: brak wpisu na liście programów"
     Check (-not (Test-Path "$app\_internal")) "po odinstalowaniu: brak katalogu _internal"
 }
 Remove-Item -Recurse -Force $work -ErrorAction SilentlyContinue
