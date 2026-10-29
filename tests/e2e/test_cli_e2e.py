@@ -707,7 +707,7 @@ def test_test_kod2_offline_certificate(tmp_path, kind):
     op = json.loads(r.stdout)["kod2"]
     assert op["code"] == "KOD2_SIGNATURE_VALID" and op["synthetic"] is True
     assert op["url"].startswith("https://qr-test.ksef.mf.gov.pl/certificate/Nip/")
-    assert "Zmiana danych unieważnia podpis" in op["message"]
+    assert "unieważnia podpis" in op["message"]
 
 
 def test_test_kod2_rejects_authentication_certificate(pair):
@@ -779,3 +779,45 @@ def test_trust_add_list_remove(tmp_path, ca, monkeypatch):
     assert run("trust", "remove", fp[:12], env=env).returncode == 0
     assert "brak" in run("trust", "list", env=env).stdout
     assert run("trust", "add", cafile, env=env).returncode == 2  # bez terminala i bez --yes: odmowa
+
+
+def test_test_kod2_with_invoice_and_der_encoding(tmp_path):
+    c, k, _ = make_offline_pair(tmp_path, "ec")
+    inv = tmp_path / "f.xml"
+    inv.write_text(
+        "<Faktura><Podmiot1><DaneIdentyfikacyjne><NIP>5260250995</NIP></DaneIdentyfikacyjne></Podmiot1></Faktura>",
+        encoding="utf-8",
+    )
+    r = run(
+        "test-kod2", "--cert", c, "--key", k, "--password-stdin", "--json", "--invoice", inv,
+        "--context-nip", "5260250995", "--ec-format", "der", stdin=KEY_PASSWORD + "\n",
+    )  # fmt: skip
+    assert r.returncode == 0, r.stdout + r.stderr
+    op = json.loads(r.stdout)["kod2"]
+    assert op["kind"] == "INVOICE_LINK" and op["synthetic"] is False and op["signature_format"] == "DER"
+    assert op["issuing_authority"]["status"] == "NOT_VERIFIED" and op["seller_nip"] == "5260250995"
+
+
+def test_test_kod2_human_output_separates_registry_and_authority(tmp_path):
+    c, k, _ = make_offline_pair(tmp_path, "rsa")
+    r = run("test-kod2", "--cert", c, "--key", k, "--password-stdin", stdin=KEY_PASSWORD + "\n")
+    assert r.returncode == 0
+    out = _ANSI.sub("", r.stdout)
+    assert "SYNTHETIC_CRYPTO_TEST" in out and "Registry status" in out and "Issuing authority" in out
+    assert "NOT_VERIFIED" in out and "NIE używać" in out
+
+
+def test_test_kod2_rejects_bad_ec_format(tmp_path):
+    c, k, _ = make_offline_pair(tmp_path, "ec")
+    r = run(
+        "test-kod2",
+        "--cert",
+        c,
+        "--key",
+        k,
+        "--password-stdin",
+        "--ec-format",
+        "xyz",
+        stdin=KEY_PASSWORD + "\n",
+    )
+    assert r.returncode == 2

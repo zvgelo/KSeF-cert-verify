@@ -7,6 +7,8 @@ ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 cd "$ROOT"
 PY="${PYTHON:-python3}"
 VERSION="$($PY -c 'import sys; sys.path.insert(0,"src"); from ksef_cert_verify import __version__; print(__version__)')"
+# RPM i DEB wymagają numeracji rosnącej według ich porównań; dopuszczamy tylko liczby rozdzielone kropkami (np. 1.1.0).
+[[ "$VERSION" =~ ^[0-9]+(\.[0-9]+)*$ ]] || { echo "Nieobsługiwany format wersji: $VERSION (dozwolone: 1.2.3)" >&2; exit 1; }
 # Minimalna glibc = glibc maszyny budującej (payload PyInstaller linkuje się z jej bibliotekami systemowymi).
 GLIBC_MIN="${GLIBC_MIN:-}"
 [ -z "$GLIBC_MIN" ] && [ -f "$ROOT/dist/GLIBC_MIN" ] && GLIBC_MIN="$(cat "$ROOT/dist/GLIBC_MIN")"

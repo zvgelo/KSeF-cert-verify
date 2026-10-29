@@ -126,6 +126,27 @@ class ChainResult:
     trust: CheckStatus
     findings: list[Finding]
     path: list[str]  # odciski SHA-256 od liścia do ostatniego znalezionego ogniwa
+    issuer_kind: str = "OTHER"  # SELF_SIGNED | KSEF | OTHER (wg pola Issuer – to deklaracja, nie dowód)
+
+
+ISSUER_SELF_SIGNED, ISSUER_KSEF, ISSUER_OTHER = "SELF_SIGNED", "KSEF", "OTHER"
+
+
+def issuer_kind(cert: x509.Certificate) -> str:
+    """Rodzaj wystawcy wg pola Issuer. KSEF oznacza wyłącznie *deklarację* MF/KSeF w nazwie – bez certyfikatu
+    wystawcy nie jest to dowód pochodzenia (podpis wystawcy weryfikuje `validate_chain`)."""
+    if cert.subject == cert.issuer:
+        return ISSUER_SELF_SIGNED
+    parts = [a.value for a in cert.issuer if isinstance(a.value, str)]
+    text = " ".join(parts).casefold()
+    if "ksef" in text or "ministerstwo finans" in text:
+        return ISSUER_KSEF
+    return ISSUER_OTHER
+
+
+def _issuer_label(cert: x509.Certificate) -> str:
+    cn = cert.issuer.get_attributes_for_oid(x509.NameOID.COMMON_NAME)
+    return str(cn[0].value) if cn else cert.issuer.rfc4514_string()
 
 
 def _is_self_issued(cert: x509.Certificate) -> bool:
@@ -180,6 +201,7 @@ def validate_chain(
     trusted = False
     top_untrusted_root = False
     problems: list[str] = []
+    kind = issuer_kind(leaf)
 
     if store.is_anchor(leaf):
         return ChainResult(
@@ -193,6 +215,7 @@ def validate_chain(
                 )
             ],
             path,
+            kind,
         )
 
     for _ in range(MAX_CHAIN_DEPTH):
@@ -256,11 +279,17 @@ def validate_chain(
             )
         else:
             crypto = CheckStatus.UNKNOWN
+            declared = {
+                ISSUER_KSEF: "zadeklarowany jako KSeF/MF",
+                ISSUER_OTHER: "inny urząd certyfikacji",
+            }.get(kind, "")
             findings.append(
                 Finding(
                     "ISSUER_MISSING",
                     CheckStatus.UNKNOWN,
-                    "Brak certyfikatu wystawcy (ani w punktach zaufania, ani w pliku) – nie można zweryfikować podpisu.",
+                    f"Podpis wystawcy nie został sprawdzony: certyfikat wystawcy „{_issuer_label(leaf)}” "
+                    f"({declared}) nie został dostarczony ani skonfigurowany jako punkt zaufania. "
+                    "To ograniczenie weryfikacji offline, a nie błąd badanego certyfikatu.",
                 )
             )
     else:
@@ -295,6 +324,26 @@ def validate_chain(
                 "zaufanie do wystawcy nie zostało sprawdzone.",
             )
         )
+        if top_untrusted_root and len(path) == 1:
+            findings.append(
+                Finding(
+                    "TRUST_SELF_SIGNED",
+                    CheckStatus.NOT_CHECKED,
+                    "Certyfikat samopodpisany: podpis własny jest poprawny, lecz brak zaufanego łańcucha PKI. "
+                    "Akceptacja przez KSeF TEST (jeśli występuje) to osobny wynik w sekcji ONLINE.",
+                )
+            )
+    elif top_untrusted_root and len(path) == 1:
+        # Samopodpisany liść spoza punktów zaufania: nie ma podstawy zaufania PKI, ale to nie jest dowód błędu.
+        trust = CheckStatus.UNKNOWN
+        findings.append(
+            Finding(
+                "TRUST_SELF_SIGNED",
+                CheckStatus.UNKNOWN,
+                "Certyfikat samopodpisany: podpis własny jest poprawny, lecz brak zaufanego łańcucha PKI. "
+                "Akceptacja przez KSeF TEST (jeśli występuje) to osobny wynik w sekcji ONLINE.",
+            )
+        )
     elif top_untrusted_root:
         trust = CheckStatus.FAIL
         findings.append(
@@ -315,4 +364,4 @@ def validate_chain(
                 "Nie zbudowano pełnej ścieżki do zaufanego punktu (brakuje ogniwa łańcucha).",
             )
         )
-    return ChainResult(crypto, trust, findings, path)
+    return ChainResult(crypto, trust, findings, path, kind)

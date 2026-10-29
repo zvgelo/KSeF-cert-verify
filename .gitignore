@@ -28,3 +28,8 @@ history.patch
 *.log
 *.patch
 *.bundle
+
+# lokalne dane testowe (prawdziwe certyfikaty/klucze) – nigdy do repozytorium
+/test cert.*
+/test offline.*
+*.crt

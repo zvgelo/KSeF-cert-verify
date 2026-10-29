@@ -190,6 +190,10 @@ class CertReport:
     online_status: str  # NOT_CHECKED albo status z API / UNKNOWN
     chain: list[str] = field(default_factory=list)  # odciski SHA-256 ścieżki
     operations: dict[str, Any] = field(default_factory=dict)  # wyniki operacji (uwierzytelnienie, KOD II)
+    owner: dict[str, Any] = field(default_factory=dict)  # właściciel = X.509 Subject (patrz owner_info)
+    api_subject: dict[str, Any] | None = (
+        None  # podmiot z API – tylko gdy rekord rejestru jednoznacznie dopasowano
+    )
 
     def local_result(self) -> Verdict:
         g = group_status(self.checks, GROUPS["local"])
@@ -206,6 +210,18 @@ class CertReport:
             CheckStatus.UNKNOWN: "UNCONFIRMED",
             CheckStatus.NOT_CHECKED: "UNCONFIRMED",
         }.get(g, "CONFIRMED")
+
+    def ksef_context(self) -> dict[str, Any] | None:
+        """Kontekst wskazany do uwierzytelnienia (np. Nip:6666666666) – nie dowodzi tożsamości właściciela."""
+        ctx = self.operations.get("authentication", {}).get("context")
+        return {"value": ctx, "source": "uwierzytelnienie KSeF"} if ctx else None
+
+    def online_authorization(self) -> str:
+        """GRANTED/DENIED tylko, gdy potwierdziło to API (uwierzytelnienie XAdES lub odpowiedź rejestru)."""
+        auth = self.operations.get("authentication", {})
+        if auth.get("authorization") in ("GRANTED", "DENIED"):
+            return str(auth["authorization"])
+        return "NOT_TESTED"
 
     def summary(self) -> dict[str, Any]:
         c = self.checks
@@ -235,6 +251,10 @@ class CertReport:
             "KSEF_PROFILE_VALIDATION": c["profile"].status.value,
             "KSEF_ONLINE_STATUS": self.online_status,
             "KSEF_AUTHENTICATION_RESULT": auth.get("code", "NOT_TESTED"),
+            # niezależne wyniki online: uwierzytelnienie ≠ autoryzacja ≠ wpis w rejestrze certyfikatów
+            "KSEF_AUTHENTICATION": auth.get("authentication", "NOT_TESTED"),
+            "KSEF_AUTHORIZATION": self.online_authorization(),
+            "KSEF_REGISTRY_STATUS": self.online_status,
             "LOCAL_KEYSET_RESULT": self.local_result().value,
             "TRUST_RESULT": self.trust_result(),
             "LOCAL_RESULT": self.verdict.value,
@@ -245,6 +265,10 @@ class CertReport:
             "index": self.index,
             "role": self.role,
             "certificate": self.info.to_dict(),
+            # trzy RÓŻNE pojęcia: właściciel (X.509 Subject), kontekst KSeF (NIP uwierzytelnienia), podmiot z API
+            "owner": self.owner,
+            "ksef_context": self.ksef_context(),
+            "api_subject": self.api_subject,
             "type": self.cert_type.value,
             "days_remaining": self.days_remaining,
             "expiry_warning_days": self.expiry_warning_days,

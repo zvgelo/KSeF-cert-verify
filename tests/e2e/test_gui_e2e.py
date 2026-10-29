@@ -491,16 +491,21 @@ def test_pkcs12_certificate_with_embedded_key(qtbot, make_window, auth_cert, tmp
 
 
 # ============================================================ tryby, PROD, online
-def test_modes_follow_certificate_type(qtbot, make_window, nip_pair, offline_pair):
+def test_no_mode_selector_and_online_fields_hidden_until_enabled(qtbot, make_window, nip_pair, offline_pair):
+    from PySide6.QtWidgets import QRadioButton
+
     w = make_window()
-    assert w.current_mode() == "local" and w.online_box.isHidden()
-    w.set_cert(nip_pair[1])  # Authentication
-    assert w.rad_auth.isEnabled() and not w.rad_kod2.isEnabled()
-    w.set_cert(offline_pair[1])  # Offline
-    assert w.rad_kod2.isEnabled() and not w.rad_auth.isEnabled() and not w.chk_auto_auth.isEnabled()
-    w.rad_online.setChecked(True)
+    assert w.findChildren(QRadioButton) == []  # brak wyboru trybu – weryfikacja lokalna jest zawsze
+    assert not w.chk_online.isChecked() and w.online_box.isHidden()  # domyślnie bez sieci
+    assert w.chk_online.text() == "Sprawdź również online w KSeF"
+    w.set_cert(nip_pair[1])
+    w.chk_online.setChecked(True)
     assert not w.online_box.isHidden() and w.cmb_env.currentText() == "TEST"
-    w.rad_local.setChecked(True)
+    assert [w.cmb_env.itemText(i) for i in range(w.cmb_env.count())] == ["TEST", "DEMO", "PROD"]
+    assert w.edit_context.isVisibleTo(w) and w.lbl_online_hint.isHidden()
+    w.set_cert(offline_pair[1])  # Offline: podpowiedź, że nie uwierzytelniamy certyfikatem Offline
+    assert not w.lbl_online_hint.isHidden() and "Offline nie uwierzytelniamy" in w.lbl_online_hint.text()
+    w.chk_online.setChecked(False)
     assert w.online_box.isHidden()
 
 
@@ -508,7 +513,7 @@ def test_prod_warning_and_explicit_confirmation(qtbot, make_window, nip_pair):
     fake = FakeKsef(query_items=[item_for(nip_pair[0], "Active")])
     w = make_window(fake=fake)
     fill(w, nip_pair[1:])
-    w.rad_online.setChecked(True)
+    w.chk_online.setChecked(True)
     assert w.lbl_prod.isHidden()
     w.cmb_env.setCurrentText("PROD")
     assert not w.lbl_prod.isHidden()
@@ -529,8 +534,7 @@ def test_automatic_authentication_full_flow_in_gui(qtbot, make_window, nip_pair)
     fake = FakeKsef(query_items=[item_for(cert, "Active")])
     w = make_window(fake=fake)
     fill(w, (c, k))
-    w.rad_online.setChecked(True)
-    assert w.chk_auto_auth.isChecked() and w.chk_auto_auth.isEnabled()
+    w.chk_online.setChecked(True)
     run_verify(qtbot, w)
     paths = [p for _, p in fake.calls]
     assert (
@@ -545,22 +549,40 @@ def test_automatic_authentication_full_flow_in_gui(qtbot, make_window, nip_pair)
         assert secret not in blob
 
 
-def test_auth_mode_tests_authentication_only_without_status_query(qtbot, make_window, nip_pair):
+def test_online_disabled_means_zero_http_requests_and_quiet_online_card(
+    qtbot, make_window, nip_pair, monkeypatch
+):
     fake = FakeKsef()
     w = make_window(fake=fake)
     fill(w, nip_pair[1:])
-    w.rad_auth.setChecked(True)
     run_verify(qtbot, w)
-    assert "/certificates/query" not in [p for _, p in fake.calls] and "/auth/token/redeem" in [
-        p for _, p in fake.calls
-    ]
-    assert "AUTH_SUCCESS" in w._cards["online"]["sub"].text() or "AUTH_SUCCESS" in w.lbl_ops.text()
+    assert fake.calls == [] and card(w, "local") == ("POPRAWNY", "pass")
+    assert (
+        card(w, "online") == ("NIE SPRAWDZONO", "unk")
+        and w._cards["online"]["sub"].text() == "Nie sprawdzono."
+    )
+
+
+def test_authentication_success_is_not_reported_as_active_without_registry_proof(
+    qtbot, make_window, nip_pair
+):
+    fake = FakeKsef(query_items=[])  # uwierzytelnienie OK, ale rejestr nie zawiera certyfikatu
+    w = make_window(fake=fake)
+    fill(w, nip_pair[1:])
+    w.chk_online.setChecked(True)
+    run_verify(qtbot, w)
+    assert card(w, "online")[0] == "UWIERZYTELNIONO" and "AKTYWNY" not in w._cards["online"]["sub"].text()
+    assert (
+        "Status w rejestrze KSeF: NIE ZNALEZIONO" in w.details.toPlainText()
+        or "NIE DOTYCZY" in w.details.toPlainText()
+    )
+    assert card(w, "trust")[0] != "POTWIERDZONE" or w._report.certificates[0].trust_result() == "CONFIRMED"
 
 
 def test_no_permissions_is_authorization_result_local_unaffected(qtbot, make_window, nip_pair):
     w = make_window(fake=FakeKsef(statuses=[415]))
     fill(w, nip_pair[1:])
-    w.rad_online.setChecked(True)
+    w.chk_online.setChecked(True)
     run_verify(qtbot, w)
     assert card(w, "local") == ("POPRAWNY", "pass")
     assert card(w, "online")[0] == "NIEUSTALONY" and "AUTH_NO_PERMISSIONS" in w._cards["online"]["sub"].text()
@@ -573,8 +595,7 @@ def test_offline_certificate_not_offered_xades_in_online_mode(qtbot, make_window
     fake = FakeKsef()
     w = make_window(fake=fake)
     fill(w, offline_pair[1:])
-    w.rad_online.setChecked(True)
-    assert not w.chk_auto_auth.isEnabled()
+    w.chk_online.setChecked(True)
     run_verify(qtbot, w)
     assert fake.calls == [] and "AUTH_NOT_APPLICABLE" in w._cards["online"]["sub"].text()
     assert card(w, "local")[0] == "POPRAWNY"
@@ -585,7 +606,7 @@ def test_existing_jwt_advanced_option(qtbot, make_window, nip_pair):
     fake = FakeKsef(query_items=[item_for(cert, "Revoked")])
     w = make_window(fake=fake)
     fill(w, (c, k))
-    w.rad_online.setChecked(True)
+    w.chk_online.setChecked(True)
     assert w.adv_box.isHidden()
     qtbot.mouseClick(w.btn_advanced, Qt.MouseButton.LeftButton)
     assert (
@@ -598,7 +619,7 @@ def test_existing_jwt_advanced_option(qtbot, make_window, nip_pair):
         and "token KSeF" in w.findChild(QWidget, "lbl_jwt_help").text()
     )
     w.chk_use_jwt.setChecked(True)
-    assert w.edit_jwt.isEnabled() and not w.chk_auto_auth.isChecked()
+    assert w.edit_jwt.isEnabled()
     assert w.edit_jwt.echoMode() == QLineEdit.EchoMode.Password
     w.edit_jwt.setText(ACCESS_JWT)
     assert "autentyczność NIE została potwierdzona" in w.lbl_jwt_state.text()
@@ -617,7 +638,7 @@ def test_bad_and_expired_jwt_rejected_before_request(qtbot, make_window, nip_pai
     fake = FakeKsef()
     w = make_window(fake=fake)
     fill(w, nip_pair[1:])
-    w.rad_online.setChecked(True)
+    w.chk_online.setChecked(True)
     w.chk_use_jwt.setChecked(True)
     w.edit_jwt.setText(token)
     assert fragment in w.lbl_jwt_state.text()
@@ -628,14 +649,14 @@ def test_bad_and_expired_jwt_rejected_before_request(qtbot, make_window, nip_pai
 def test_empty_jwt_field_blocks_run(qtbot, make_window, nip_pair):
     w = make_window(fake=FakeKsef())
     fill(w, nip_pair[1:])
-    w.rad_online.setChecked(True)
+    w.chk_online.setChecked(True)
     w.chk_use_jwt.setChecked(True)
     qtbot.mouseClick(w.btn_verify, Qt.MouseButton.LeftButton)
     assert w._task is None and w._report is None and any("pole tokena jest puste" in m[1] for m in w.messages)
 
 
 @pytest.mark.parametrize("kind", ["ec", "rsa"])
-def test_kod2_mode_for_offline_certificate(qtbot, make_window, ca, tmp_path, kind):
+def test_kod2_test_runs_for_offline_certificate(qtbot, make_window, ca, tmp_path, kind):
     from cryptography.hazmat.primitives.asymmetric import rsa
 
     key = ec.generate_private_key(ec.SECP256R1()) if kind == "ec" else rsa.generate_private_key(65537, 2048)
@@ -644,9 +665,7 @@ def test_kod2_mode_for_offline_certificate(qtbot, make_window, ca, tmp_path, kin
     c.write_bytes(pem(cert))
     w = make_window()
     fill(w, (c, k))
-    assert w.rad_kod2.isEnabled()
-    w.rad_kod2.setChecked(True)
-    run_verify(qtbot, w)
+    run_verify(qtbot, w)  # Offline: lokalny test KODU II wykonuje się zawsze (bez sieci)
     assert "KOD2_SIGNATURE_VALID" in w.lbl_ops.text() and "syntetyczny" in w.lbl_ops.text()
     assert card(w, "local")[0] == "POPRAWNY"
 
@@ -726,3 +745,184 @@ def test_hostile_certificate_subject_is_sanitized(qtbot, make_window, tmp_path, 
     assert bidi not in text and esc not in text and "<b>x" in w.details.toPlainText().replace("\\", "")
     w.copy_to_clipboard()
     assert bidi not in QGuiApplication.clipboard().text()
+
+
+def _write_cert(tmp_path, name, subject, kind="Authentication"):
+    from tests.conftest import make_ca, make_leaf, pem
+
+    cert, _ = make_leaf(make_ca(), kind=kind, subject=subject)
+    p = tmp_path / name
+    p.write_bytes(pem(cert))
+    return str(p)
+
+
+def _owner_texts(w):
+    return [v.text() for _k, v in w._owner_values]
+
+
+def test_owner_box_appears_automatically_without_password_or_network(qtbot, make_window, tmp_path):
+    from tests.conftest import _name
+
+    w = make_window()
+    assert not w.owner_box.isVisibleTo(w)
+    w.edit_cert.setText(
+        _write_cert(tmp_path, "o.pem", _name(cn="Pieczęć", o="Firma SA", orgid="VATPL-5260250995"))
+    )
+    assert w.owner_box.isVisibleTo(w) and not w.edit_password.text()
+    t = _owner_texts(w)
+    assert t[0] == "Firma SA" and "NIP 5260250995" in t[1] and t[2] == "Firma SA" and t[3] == "Authentication"
+    assert t[4] != "Brak danych"  # data wygaśnięcia
+
+
+def test_owner_box_shows_missing_data_not_guesses(qtbot, make_window, tmp_path):
+    from tests.conftest import _name
+
+    w = make_window()
+    w.edit_cert.setText(_write_cert(tmp_path, "e.pem", _name()))
+    t = _owner_texts(w)
+    assert t[0] == "Brak danych" and t[1] == "Brak danych" and t[2] == "Brak danych"
+
+
+def test_owner_cleared_immediately_when_certificate_changes(qtbot, make_window, tmp_path):
+    from tests.conftest import _name
+
+    w = make_window()
+    w.edit_cert.setText(
+        _write_cert(tmp_path, "a.pem", _name(cn="Jan", given="Jan", sn="Kowalski", serial="PNOPL44051401359"))
+    )
+    assert "Jan Kowalski" in _owner_texts(w)[0]
+    w.edit_cert.setText(
+        str(tmp_path / "nie-ma.pem")
+    )  # zła ścieżka: nie wolno zostawić poprzedniej tożsamości
+    assert not w.owner_box.isVisibleTo(w) and all(not x for x in _owner_texts(w))
+    w.edit_cert.setText(_write_cert(tmp_path, "b.pem", _name(cn="Anna", given="Anna", sn="Nowak")))
+    assert "Anna Nowak" in _owner_texts(w)[0] and "Kowalski" not in " ".join(_owner_texts(w))
+
+
+def test_technical_details_are_collapsed_until_expanded(qtbot, make_window, tmp_path):
+    from tests.conftest import _name
+
+    w = make_window()
+    w.edit_cert.setText(_write_cert(tmp_path, "a.pem", _name(cn="Jan", given="Jan", sn="Kowalski")))
+    assert not w.lbl_owner_tech.isVisibleTo(w)
+    w.btn_owner_more.click()
+    assert w.lbl_owner_tech.isVisibleTo(w)
+    txt = w.lbl_owner_tech.text()
+    for needle in ("Subject:", "Issuer:", "Numer seryjny:", "SHA-256:", "Key Usage:", "Basic Constraints:"):
+        assert needle in txt
+
+
+def test_ksef_context_is_separate_from_owner(qtbot, make_window, tmp_path):
+    from tests.conftest import _name
+
+    w = make_window()
+    w.edit_cert.setText(_write_cert(tmp_path, "a.pem", _name(cn="Jan", given="Jan", sn="Kowalski")))
+    assert not w.lbl_owner_context.isVisibleTo(w)
+    w.edit_context.setText("6666666666")
+    assert "Kontekst KSeF" in w.lbl_owner_context.text() and "6666666666" in w.lbl_owner_context.text()
+    assert "6666666666" not in " ".join(_owner_texts(w))  # kontekst nie jest tożsamością właściciela
+
+
+def test_offline_certificate_with_jwt_queries_registry_without_xades(qtbot, make_window, ca, tmp_path):
+    key = ec.generate_private_key(ec.SECP256R1())
+    cert, _ = make_leaf(ca, kind="Offline", key=key)
+    c, k = tmp_path / "o.crt", write_key(tmp_path / "o.key", key)
+    c.write_bytes(pem(cert))
+    fake = FakeKsef(query_items=[item_for(cert, "Active", typ="Offline")])
+    w = make_window(fake=fake)
+    fill(w, (c, k))
+    w.chk_online.setChecked(True)
+    w.chk_use_jwt.setChecked(True)
+    w.edit_jwt.setText(ACCESS_JWT)
+    run_verify(qtbot, w)
+    assert [p for _, p in fake.calls] == [
+        "/certificates/query"
+    ]  # zero /auth/* – nie uwierzytelniamy certyfikatem Offline
+    assert card(w, "online")[0] == "AKTYWNY" and "KOD2_SIGNATURE_VALID" in w.lbl_ops.text()
+    assert card(w, "local")[0] == "POPRAWNY"
+
+
+def test_online_error_does_not_change_local_result(qtbot, make_window, nip_pair):
+    w = make_window(fake=FakeKsef(statuses=[500]))
+    fill(w, nip_pair[1:])
+    w.chk_online.setChecked(True)
+    run_verify(qtbot, w)
+    assert card(w, "local") == ("POPRAWNY", "pass") and card(w, "online")[0] != "AKTYWNY"
+
+
+# ============================================================ KOD II w GUI
+KOD2_INVOICE = (
+    "<Faktura><Podmiot1><DaneIdentyfikacyjne><NIP>5260250995</NIP></DaneIdentyfikacyjne></Podmiot1></Faktura>"
+)
+
+
+def test_kod2_section_only_for_offline_certificates(qtbot, make_window, nip_pair, offline_pair):
+    w = make_window()
+    assert w.btn_kod2.isHidden() and w.kod2_box.isHidden()
+    w.set_cert(nip_pair[1])
+    assert w.btn_kod2.isHidden()  # Authentication: bez KODU II
+    w.set_cert(offline_pair[1])
+    assert not w.btn_kod2.isHidden() and w.kod2_box.isHidden()  # zwinięta do czasu kliknięcia
+    w.btn_kod2.click()
+    assert not w.kod2_box.isHidden() and w.btn_kod2_open.isEnabled() is False
+    w.set_cert(nip_pair[1])  # zmiana certyfikatu zwija i czyści sekcję
+    assert w.btn_kod2.isHidden() and w.kod2_box.isHidden() and not w.edit_kod2_link.text()
+
+
+def test_kod2_synthetic_test_and_open_link_is_explicit_action(qtbot, make_window, offline_pair, monkeypatch):
+    from PySide6.QtGui import QDesktopServices
+
+    opened = []
+    monkeypatch.setattr(
+        QDesktopServices, "openUrl", staticmethod(lambda u: opened.append(u.toString()) or True)
+    )
+    fake = FakeKsef()
+    w = make_window(fake=fake)
+    fill(w, offline_pair[1:])
+    w.edit_kod2_context.setText(NIP)
+    run_verify(qtbot, w)
+    assert fake.calls == [] and opened == []  # weryfikacja nie otwiera ani nie wysyła niczego
+    assert w.edit_kod2_link.text().startswith("https://qr-test.ksef.mf.gov.pl/certificate/Nip/")
+    assert "KOD2_SIGNATURE_VALID" in w.lbl_ops.text() and "syntetyczny" in w.lbl_ops.text().lower()
+    assert "NIE ZWERYFIKOWANO" in w.lbl_ops.text()  # uprawnienia ≠ status w rejestrze
+    assert w.btn_kod2_open.isEnabled()
+    qtbot.mouseClick(w.btn_kod2_open, Qt.MouseButton.LeftButton)
+    assert opened == [w.edit_kod2_link.text()]
+
+
+def test_kod2_never_opens_unofficial_host_or_prod_synthetic(qtbot, make_window, offline_pair, monkeypatch):
+    from PySide6.QtGui import QDesktopServices
+
+    opened = []
+    monkeypatch.setattr(
+        QDesktopServices, "openUrl", staticmethod(lambda u: opened.append(u.toString()) or True)
+    )
+    w = make_window()
+    w.edit_kod2_link.setText("https://evil.example/certificate/Nip/1/2/3/4/5/6")
+    assert w.open_kod2_link() is False and opened == []
+    fill(w, offline_pair[1:])
+    w.edit_kod2_context.setText(NIP)
+    w.cmb_kod2_env.setCurrentText("PROD")
+    run_verify(qtbot, w)
+    assert (
+        w.edit_kod2_link.text().startswith("https://qr.ksef.mf.gov.pl/") and not w.btn_kod2_open.isEnabled()
+    )
+
+
+def test_kod2_with_invoice_xml_uses_its_hash_and_seller(qtbot, make_window, offline_pair, tmp_path):
+    from ksef_cert_verify.core import kod2
+
+    inv = tmp_path / "f.xml"
+    inv.write_text(KOD2_INVOICE, encoding="utf-8")
+    w = make_window()
+    fill(w, offline_pair[1:])
+    w.edit_invoice.setText(str(inv))
+    w.edit_kod2_context.setText("5260250995")
+    run_verify(qtbot, w)
+    link = kod2.parse_url(w.edit_kod2_link.text())
+    assert (
+        link
+        and link.invoice_hash_b64url == kod2.invoice_hash(inv.read_bytes())
+        and link.seller_nip == "5260250995"
+    )
+    assert "syntetyczny" not in w.lbl_ops.text().lower() and "skrót wskazanej faktury" in w.lbl_ops.text()

@@ -45,9 +45,11 @@ def test_single_version_source_matches_installers_and_license():
     assert "version" in meta["project"]["dynamic"] and meta["tool"]["setuptools"]["dynamic"]["version"] == {
         "attr": "ksef_cert_verify.__version__"
     }
-    assert f'#define AppVersion "{__version__}"' in read(
-        "packaging/windows/KSeF-cert-verify.iss"
-    )  # domyślna wersja instalatora
+    iss = read("packaging/windows/KSeF-cert-verify.iss")
+    assert "#define AppVersion" not in iss.replace(
+        "#ifndef AppVersion", ""
+    )  # wersja tylko z /DAppVersion (build.ps1)
+    assert "#error" in iss
     from importlib.metadata import PackageNotFoundError, version
 
     try:

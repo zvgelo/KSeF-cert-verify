@@ -44,7 +44,22 @@ jobs:
       - name: Build, testy EXE i test instalatora (packaging/windows/build.ps1)
         shell: pwsh
         # testy pytest uruchamia osobno ci.yml; tu: kroki 1-3 i 5-9 + cicha instalacja/odinstalowanie
-        run: ./packaging/windows/build.ps1 -UseCurrentPython -SkipTests -TestInstaller
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        run: |
+          # Aktualizacja w miejscu: poprzednie PUBLICZNE wydanie (prawdziwy instalator) -> instalator z tego builda.
+          $old = $null
+          $version = python -c "import sys; sys.path.insert(0,'src'); from ksef_cert_verify import __version__ as v; print(v)"
+          New-Item -ItemType Directory -Force prev | Out-Null
+          gh release download --repo $env:REPO --pattern "*-setup.exe" --dir prev 2>$null
+          $prev = Get-ChildItem prev -Filter "*-setup.exe" -ErrorAction SilentlyContinue | Select-Object -First 1
+          if (-not $prev) { Write-Host "::notice::Brak poprzedniego wydania - test aktualizacji Windows pominiety." }
+          elseif ($prev.Name -like "*-$version-*") { Write-Host "::notice::Poprzednie wydanie ma te sama wersje ($version) - test aktualizacji pominiety." }
+          else { $old = $prev.FullName }
+          if ($old) { ./packaging/windows/build.ps1 -UseCurrentPython -SkipTests -TestInstaller -OldSetup $old }
+          else { ./packaging/windows/build.ps1 -UseCurrentPython -SkipTests -TestInstaller }
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: windows-installer
@@ -200,6 +215,58 @@ jobs:
           docker run --rm -v "$PWD/pkg:/pkg:ro" -v "$PWD/fixtures:/fix:ro" \
             -v "$PWD/packaging/linux/test-install.sh:/t.sh:ro" fedora:44 \
             bash -c 'bash /t.sh rpm "$(ls /pkg/*.rpm | head -1)" /fix'
+
+  upgrade-linux:
+    # Aktualizacja natywnym menedżerem: poprzednie PUBLICZNE wydanie (prawdziwy pakiet) → pakiet z tego builda.
+    # Gdy nie ma jeszcze wydania albo wersja się nie zmieniła, test jest pomijany z jawną informacją (nie ma czego aktualizować).
+    name: aktualizacja ${{ matrix.kind }} (${{ matrix.image }})
+    needs: [rpm, deb, fixtures]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {kind: rpm, image: "fedora:44"}
+          - {kind: deb, image: "ubuntu:24.04"}
+          - {kind: deb, image: "debian:13"}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          ref: ${{ inputs.ref || github.sha }}
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: ${{ matrix.kind }}
+          path: new
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: fixtures
+          path: fixtures
+      - name: Poprzednie wydanie (pakiet ${{ matrix.kind }})
+        id: old
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        run: |
+          mkdir old
+          if ! gh release download --repo "$REPO" --pattern "*.${{ matrix.kind }}" --dir old 2>/dev/null; then
+            echo "::notice::Brak poprzedniego wydania z pakietem ${{ matrix.kind }} – test aktualizacji pominięty."
+            echo "run=false" >> "$GITHUB_OUTPUT"; exit 0
+          fi
+          echo "run=true" >> "$GITHUB_OUTPUT"
+      - name: Test aktualizacji w kontenerze ${{ matrix.image }}
+        if: steps.old.outputs.run == 'true'
+        run: |
+          old="$(ls old/*.${{ matrix.kind }} | head -1)"; new="$(ls new/*.${{ matrix.kind }} | head -1)"
+          if [ "$(basename "$old")" = "$(basename "$new")" ]; then
+            echo "::notice::Poprzednie wydanie ma tę samą wersję co build – to nie jest aktualizacja, test pominięty."; exit 0
+          fi
+          docker run --rm -e DEBIAN_FRONTEND=noninteractive -e FIXTURES=/fix \
+            -v "$PWD/old:/old:ro" -v "$PWD/new:/new:ro" -v "$PWD/fixtures:/fix:ro" \
+            -v "$PWD/packaging/linux/test-upgrade.sh:/t.sh:ro" ${{ matrix.image }} \
+            bash -c '[ "${{ matrix.kind }}" = deb ] && apt-get update -qq; bash /t.sh /old/*.${{ matrix.kind }} /new/*.${{ matrix.kind }}'
 
   appimage:
     needs: linux-payload

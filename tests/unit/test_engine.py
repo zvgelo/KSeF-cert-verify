@@ -305,7 +305,9 @@ def test_sha1_signature_warns_if_openssl_allows():
 def test_self_signed_not_anchor_with_anchors_configured(ca):
     selfsigned = make_ca("Samopodpisany")
     r = run(selfsigned.cert, ca)
-    assert r.checks["trust"].status is F
+    # podpis własny poprawny (PASS), zaufanie PKI niepotwierdzone (nie błąd certyfikatu)
+    assert r.checks["crypto"].status is P and r.checks["trust"].status is U
+    assert any(f.code == "TRUST_SELF_SIGNED" for f in r.checks["trust"].findings)
 
 
 def test_anchor_matching_is_by_der_not_by_name(ca):
