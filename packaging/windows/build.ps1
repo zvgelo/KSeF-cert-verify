@@ -20,6 +20,8 @@
   Pomija krok 4 (np. gdy testy uruchomiono osobno). Krok jest wtedy oznaczony jako POMINIETY - nie jako zaliczony.
 .PARAMETER UseCurrentPython
   Nie tworzy .venv-build; uzywa Pythona z PATH (np. w CI po `pip install`). Krok 3 nadal instaluje zaleznosci.
+.PARAMETER OldSetup
+  Z -TestInstaller: sciezka do instalatora POPRZEDNIEJ wersji (prawdziwy plik z wydania) - dodatkowo test aktualizacji w miejscu.
 .PARAMETER TestInstaller
   Po zbudowaniu instalatora wykonuje test E2E: cicha instalacja -> CLI/GUI -> odinstalowanie (packaging\windows\test-installer.ps1).
 
@@ -31,6 +33,7 @@ param(
     [switch]$SkipTests,
     [switch]$UseCurrentPython,
     [switch]$TestInstaller,
+    [string]$OldSetup,
     [switch]$AllowNetworkPath
 )
 
@@ -240,7 +243,7 @@ VSVersionInfo(
     if ($TestInstaller) {
         Write-Host ""
         Write-Host "--- Test instalatora: cicha instalacja -> CLI/GUI -> odinstalowanie ---" -ForegroundColor Cyan
-        & (Join-Path $PSScriptRoot "test-installer.ps1") -Setup $setup
+        & (Join-Path $PSScriptRoot "test-installer.ps1") -Setup $setup -OldSetup $OldSetup
         if ($LASTEXITCODE -ne 0) { throw "Test instalatora zakonczyl sie bledem (exit $LASTEXITCODE)" }
     } else {
         $script:skipped += "test instalatora (uruchom z -TestInstaller)"

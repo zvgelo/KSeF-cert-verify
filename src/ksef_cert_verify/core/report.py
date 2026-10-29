@@ -36,6 +36,7 @@ class VerifyOptions:
     now: datetime | None = None
     online_requested: bool = False
     online_note: str | None = None
+    online_fetch_certificate: bool = False
     require_encrypted_key: bool = True  # klucz niezaszyfrowany = problem bezpieczeństwa (FAIL)
 
 
@@ -142,6 +143,7 @@ def verify_file(
             online=options.online,
             online_requested=options.online_requested,
             online_note=options.online_note,
+            online_fetch_certificate=options.online_fetch_certificate,
             candidates=others,
             key_decrypt=key_decrypt,
             key_spki=key_spki,

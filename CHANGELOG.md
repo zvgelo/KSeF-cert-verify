@@ -1,8 +1,15 @@
 # Changelog
 
-## [Unreleased] – 1.0.0
+## 1.0.1
 
-Pierwsze wydanie (jeszcze nieopublikowane).
+- GUI: simpler verification, certificate owner details.
+- Certificate verification fixes.
+- KOD II verification per MF specification.
+- Installer upgrade handling.
+
+## 1.0.0
+
+Pierwsze wydanie.
 
 - Weryfikacja certyfikatu KSeF razem z zaszyfrowanym kluczem prywatnym i hasłem (RSA 2048, EC P-256), aktywny test podpisu.
 - Rozdzielone wyniki: LOCAL (zestaw cert+klucz), TRUST (łańcuch, CA, profil KSeF), ONLINE (status, uwierzytelnienie).

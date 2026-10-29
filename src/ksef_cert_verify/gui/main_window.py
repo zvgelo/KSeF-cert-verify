@@ -16,7 +16,6 @@ from PySide6.QtCore import QSettings, Qt, QThreadPool, QUrl
 from PySide6.QtGui import QAction, QDesktopServices, QDragEnterEvent, QDropEvent, QGuiApplication, QIcon
 from PySide6.QtWidgets import (
     QApplication,
-    QButtonGroup,
     QCheckBox,
     QComboBox,
     QDialog,
@@ -32,7 +31,6 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QPlainTextEdit,
     QPushButton,
-    QRadioButton,
     QScrollArea,
     QToolButton,
     QVBoxLayout,
@@ -48,9 +46,10 @@ from ksef_cert_verify.branding import (
     PRODUCT_SUBTITLE,
     REPOSITORY_URL,
 )
+from ksef_cert_verify.core import kod2
 from ksef_cert_verify.core.certificate_classifier import classify
 from ksef_cert_verify.core.certificate_loader import LoaderError, load_file
-from ksef_cert_verify.core.certificate_parser import fingerprint, parse_certificate
+from ksef_cert_verify.core.certificate_parser import fingerprint, owner_info, parse_certificate
 from ksef_cert_verify.core.models import GROUPS, CertReport, CertType, Check, CheckStatus, FileReport, Verdict
 from ksef_cert_verify.core.report import VerifyOptions, build_json, dumps
 from ksef_cert_verify.core.trust_store import TrustStore
@@ -112,10 +111,22 @@ ONLINE_PL = {
     "Revoked": "UNIEWAŻNIONY",
     "Expired": "WYGASŁY",
     "NOT_FOUND": "NIE ZNALEZIONO",
+    "NOT_APPLICABLE": "NIE DOTYCZY",
     "UNKNOWN": "NIEUSTALONY",
 }
+AUTH_PL = {
+    "ACCEPTED": "PRZYJĘTE",
+    "REJECTED": "ODRZUCONE",
+    "UNKNOWN": "NIEUSTALONE",
+    "NOT_TESTED": "NIE TESTOWANO",
+}
+AUTHZ_PL = {
+    "GRANTED": "PRZYZNANE",
+    "DENIED": "ODMOWA",
+    "UNKNOWN": "NIEUSTALONE",
+    "NOT_TESTED": "NIE TESTOWANO",
+}
 THEME_LABEL = {"system": "Motyw: systemowy", "light": "Motyw: jasny", "dark": "Motyw: ciemny"}
-MODE_LOCAL, MODE_ONLINE, MODE_AUTH, MODE_KOD2 = "local", "online", "auth", "kod2"
 
 _UNSAFE_RANGES = [
     (0x00, 0x08),
@@ -169,6 +180,7 @@ def local_word(c: CertReport) -> tuple[str, str]:
 
 
 def online_word(c: CertReport) -> tuple[str, str]:
+    """Nagłówek karty ONLINE. Sukces uwierzytelnienia nie ginie pod „NIEUSTALONY”, ale nie oznacza też statusu ACTIVE."""
     st = c.online_status
     state = {
         "Active": "pass",
@@ -177,7 +189,79 @@ def online_word(c: CertReport) -> tuple[str, str]:
         "Expired": "fail",
         "UNKNOWN": "warn",
     }.get(st, "unk")
+    auth = c.operations.get("authentication", {})
+    if state in ("warn", "unk") and auth.get("authentication") == "ACCEPTED":
+        return "UWIERZYTELNIONO", "pass"
     return ONLINE_PL.get(st, st), state
+
+
+def online_lines(c: CertReport) -> list[str]:
+    """Niezależne wyniki ONLINE (te same słowa w karcie i w szczegółach)."""
+    auth = c.operations.get("authentication", {})
+    a = auth.get("authentication", "NOT_TESTED")
+    z = c.online_authorization()
+    return [
+        f"Uwierzytelnienie: {AUTH_PL.get(a, a)}",
+        f"Autoryzacja w kontekście: {AUTHZ_PL.get(z, z)}",
+        f"Akceptacja certyfikatu przez KSeF: {'TAK (uwierzytelnienie XAdES przyjęte)' if a == 'ACCEPTED' else 'NIE POTWIERDZONO'}",
+        f"Status w rejestrze KSeF: {ONLINE_PL.get(c.online_status, c.online_status)}",
+    ]
+
+
+MISSING = "Brak danych"
+OWNER_TYPE_PL = {"person": "osoba fizyczna", "organization": "organizacja", "unknown": "rodzaj nieustalony"}
+
+
+def owner_rows(owner: dict[str, Any], now: datetime | None = None) -> list[tuple[str, str, bool]]:
+    """Wiersze sekcji „Właściciel certyfikatu” (etykieta, wartość, czy brak danych). Wyłącznie dane z X.509 Subject."""
+    ids = []
+    if owner.get("nip"):
+        ids.append(f"NIP {owner['nip']}")
+    if owner.get("pesel"):
+        ids.append(f"PESEL {owner['pesel']}")
+    ctype = str(owner.get("certificate_type") or "UNKNOWN")
+    expiry = MISSING
+    if owner.get("not_after"):
+        expiry = _local_date(str(owner["not_after"])).split(" ")[0]
+        left = (
+            datetime.strptime(str(owner["not_after"]), "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=UTC)
+            - (now or datetime.now(UTC))
+        ).days
+        expiry += f" ({left} dni)" if left >= 0 else " (wygasł)"
+    rows = [
+        ("Podmiot", clean(owner.get("name") or MISSING), not owner.get("name")),
+        ("NIP / PESEL", ", ".join(ids) or MISSING, not ids),
+        ("Organizacja", clean(owner.get("organization") or MISSING), not owner.get("organization")),
+        ("Typ", ctype if ctype != "UNKNOWN" else "Typ nieustalony", False),
+        ("Wygasa", expiry, expiry == MISSING),
+    ]
+    return rows
+
+
+def owner_text(owner: dict[str, Any]) -> list[str]:
+    """Ten sam blok w szczegółach wyniku (GUI) – z wyraźnym rozdzieleniem trzech pojęć."""
+    lines = ["Właściciel certyfikatu (X.509 Subject):"]
+    lines += [f"  {k}: {v}" for k, v, _ in owner_rows(owner)]
+    lines += [f"  Uwaga: {n}" for n in owner.get("notes", [])]
+    return lines
+
+
+def tech_text(info: Any) -> str:
+    """Dane techniczne certyfikatu (rozwijane szczegóły)."""
+    return clean(
+        "\n".join(
+            [
+                f"Subject: {info.subject}",
+                f"Issuer: {info.issuer}",
+                f"Numer seryjny: {info.serial_hex}",
+                f"SHA-256: {info.fingerprint_sha256}",
+                f"Ważny: {info.not_before} – {info.not_after}",
+                f"Klucz: {info.key_algorithm}; podpis: {info.signature_algorithm}",
+                f"Key Usage: {', '.join(info.key_usage) or 'Brak'}",
+                f"Basic Constraints: {info.basic_constraints or 'Brak'}",
+            ]
+        )
+    )
 
 
 def cert_details_text(fr: FileReport, c: CertReport, expanded: bool) -> str:
@@ -194,6 +278,22 @@ def cert_details_text(fr: FileReport, c: CertReport, expanded: bool) -> str:
         f"Pełna walidacja: {VERDICT_PL[c.verdict]}",
         "",
     ]
+    lines += owner_text(c.owner) if c.owner else []
+    ctx = c.ksef_context()
+    lines.append(f"Kontekst KSeF (uwierzytelnienie): {clean(ctx['value']) if ctx else MISSING}")
+    api = c.api_subject
+    if api:
+        sid = api.get("subject_identifier") or {}
+        lines.append(
+            f"Podmiot z API KSeF: {clean(api.get('common_name') or MISSING)}; identyfikator "
+            f"{clean(sid.get('type') or '-')} {clean(sid.get('value') or MISSING)}; nazwa własna certyfikatu: "
+            f"{clean(api.get('certificate_name') or MISSING)}"
+        )
+    else:
+        lines.append(
+            "Podmiot z API KSeF: Brak danych (rejestr nie zwrócił dopasowanego wpisu albo nie sprawdzano)"
+        )
+    lines.append("")
     for gkey, gname, gtitle in SECTIONS:
         lines.append(f"{gname} – {gtitle}:")
         for key in GROUPS[gkey]:
@@ -204,9 +304,10 @@ def cert_details_text(fr: FileReport, c: CertReport, expanded: bool) -> str:
             if expanded or chk.status in (CheckStatus.FAIL, CheckStatus.WARNING, CheckStatus.UNKNOWN):
                 lines.extend(f"      • {f.message}" for f in chk.findings)
         if gkey == "online":
+            lines.extend(f"  {x}" for x in online_lines(c))
             auth = c.operations.get("authentication")
             if auth:
-                lines.append(f"  Uwierzytelnienie: {auth['code']} – {auth['message']}")
+                lines.append(f"  Uwierzytelnienie (kod): {auth['code']} – {auth['message']}")
                 lines.extend(
                     f"      • {st['name']}: {st['status']} – {st['message']}" for st in auth["steps"]
                 )
@@ -290,7 +391,7 @@ class MainWindow(QMainWindow):
         self._cert_nip: str | None = None
         self._build_ui()
         self.apply_theme()
-        self._on_mode_changed()
+        self._on_online_toggled()
         self._set_idle()
         self._update_trust_label()
 
@@ -412,6 +513,7 @@ class MainWindow(QMainWindow):
         chip_row.addWidget(self.lbl_cert_type)
         chip_row.addStretch(1)
         pl.addLayout(chip_row)
+        self._build_owner_box(pl)
         self.edit_key, self.btn_key = self._field("Klucz prywatny", "key", "np. KSeF_Ksiegowosc.key", "key")
 
         pw_label = QLabel("Hasło do klucza")
@@ -444,31 +546,20 @@ class MainWindow(QMainWindow):
         pl.addWidget(note)
         pl.addSpacing(SPACE["md"])
 
-        # --- tryb ---
-        mode_title = QLabel("Tryb")
-        mode_title.setObjectName("sectionTitle")
-        pl.addWidget(mode_title)
-        self.mode_group = QButtonGroup(self)
-        self.rad_local = QRadioButton("Weryfikacja lokalna")
-        self.rad_online = QRadioButton("Weryfikacja lokalna + status online")
-        self.rad_auth = QRadioButton("Test uwierzytelnienia online (Authentication)")
-        self.rad_kod2 = QRadioButton("Test podpisu KODU II (Offline)")
-        for rid, rad, name in (
-            (MODE_LOCAL, self.rad_local, "rad_local"),
-            (MODE_ONLINE, self.rad_online, "rad_online"),
-            (MODE_AUTH, self.rad_auth, "rad_auth"),
-            (MODE_KOD2, self.rad_kod2, "rad_kod2"),
-        ):
-            rad.setObjectName(name)
-            rad.setProperty("mode", rid)
-            self.mode_group.addButton(rad)
-            pl.addWidget(rad)
-        self.rad_local.setChecked(True)
-        self.mode_group.buttonToggled.connect(lambda *_: self._on_mode_changed())
+        # --- online (jedyny przełącznik; weryfikacja lokalna wykonuje się zawsze) ---
+        self.chk_online = QCheckBox("Sprawdź również online w KSeF")
+        self.chk_online.setObjectName("chk_online")
+        self.chk_online.setToolTip(
+            "Domyślnie wyłączone: program nie wykonuje żadnych żądań sieciowych. Weryfikacja lokalna "
+            "(certyfikat, klucz, hasło, podpis, profil, zaufanie) odbywa się zawsze."
+        )
+        pl.addWidget(self.chk_online)
+        self.chk_online.toggled.connect(lambda _on: self._on_online_toggled())
 
         # --- opcje online ---
         self.online_box = QFrame()
         self.online_box.setObjectName("online_box")
+        self.online_box.setVisible(False)
         ob = QVBoxLayout(self.online_box)
         ob.setContentsMargins(0, SPACE["sm"], 0, 0)
         ob.setSpacing(SPACE["sm"])
@@ -498,14 +589,12 @@ class MainWindow(QMainWindow):
         self.edit_context.setMaxLength(10)
         ob.addWidget(ctx_lbl)
         ob.addWidget(self.edit_context)
-        self.chk_auto_auth = QCheckBox("Automatyczne uwierzytelnienie w KSeF")
-        self.chk_auto_auth.setObjectName("chk_auto_auth")
-        self.chk_auto_auth.setChecked(True)
-        self.chk_auto_auth.setToolTip(
-            "Program pobierze challenge, podpisze AuthTokenRequest (XAdES) certyfikatem i kluczem, odbierze accessToken "
-            "i użyje go do zapytania o status. Dostępne tylko dla certyfikatu Authentication."
-        )
-        ob.addWidget(self.chk_auto_auth)
+        self.lbl_online_hint = QLabel("")
+        self.lbl_online_hint.setObjectName("lbl_online_hint")
+        self.lbl_online_hint.setProperty("role", "muted")
+        self.lbl_online_hint.setWordWrap(True)
+        self.lbl_online_hint.setVisible(False)
+        ob.addWidget(self.lbl_online_hint)
         self.btn_advanced = QPushButton("Zaawansowane")
         self.btn_advanced.setObjectName("btn_advanced")
         self.btn_advanced.setCheckable(True)
@@ -541,6 +630,7 @@ class MainWindow(QMainWindow):
         self.adv_box.setVisible(False)
         ob.addWidget(self.adv_box)
         pl.addWidget(self.online_box)
+        self._build_kod2_section(pl)
         self.chk_use_jwt.toggled.connect(self._on_jwt_toggled)
         self.edit_jwt.textChanged.connect(self._on_jwt_changed)
         self.btn_advanced.toggled.connect(self.adv_box.setVisible)
@@ -755,6 +845,9 @@ class MainWindow(QMainWindow):
         self.chk_details.toggled.connect(self._toggle_details)
         self.edit_password.returnPressed.connect(self.start_verification)
         self.edit_cert.editingFinished.connect(self._inspect_cert)
+        # zmiana certyfikatu (wpisanie, przeciągnięcie, wybór) natychmiast czyści i odświeża dane właściciela
+        self.edit_cert.textChanged.connect(lambda _t: self._inspect_cert())
+        self.edit_context.textChanged.connect(lambda _t: self._update_owner_context())
         self.btn_export.setEnabled(False)
         self.btn_copy.setEnabled(False)
         for a, b in (
@@ -764,38 +857,34 @@ class MainWindow(QMainWindow):
             (self.btn_key, self.edit_password),
             (self.edit_password, self.btn_show_password),
             (self.btn_show_password, self.btn_paste_password),
-            (self.btn_paste_password, self.rad_local),
+            (self.btn_paste_password, self.chk_online),
         ):
             self.setTabOrder(a, b)
 
-    # ---------- tryb i opcje online ----------
-    def current_mode(self) -> str:
-        for rad in (self.rad_local, self.rad_online, self.rad_auth, self.rad_kod2):
-            if rad.isChecked():
-                return str(rad.property("mode"))
-        return MODE_LOCAL
+    # ---------- opcje online ----------
+    def online_enabled(self) -> bool:
+        return self.chk_online.isChecked()
 
-    def _on_mode_changed(self) -> None:
-        mode = self.current_mode()
-        online = mode in (MODE_ONLINE, MODE_AUTH)
-        self.online_box.setVisible(online)
+    def _on_online_toggled(self) -> None:
+        """Pola online są widoczne tylko po zaznaczeniu przełącznika; podpowiedź zależy od typu certyfikatu."""
+        on = self.online_enabled()
+        self.online_box.setVisible(on)
         self._update_prod_warning()
-        auth_ok = self._cert_type in (None, CertType.AUTHENTICATION, CertType.UNKNOWN)
-        self.chk_auto_auth.setEnabled(auth_ok and not self.chk_use_jwt.isChecked())
-        self.rad_auth.setEnabled(auth_ok)
-        self.rad_kod2.setEnabled(self._cert_type in (None, CertType.OFFLINE, CertType.UNKNOWN))
-        if mode == MODE_AUTH:
-            self.chk_use_jwt.setChecked(False)
-            self.chk_auto_auth.setChecked(True)
+        hint = ""
+        if on and self._cert_type is CertType.OFFLINE:
+            hint = (
+                "Certyfikatem Offline nie uwierzytelniamy. Status w rejestrze wymaga osobnego, uprawnionego "
+                "tokena JWT (Zaawansowane); bez niego sprawdzony zostanie tylko lokalny test KODU II."
+            )
+        self.lbl_online_hint.setText(hint)
+        self.lbl_online_hint.setVisible(bool(hint))
+        self._update_owner_context()
 
     def _update_prod_warning(self) -> None:
         self.lbl_prod.setVisible(self.online_box.isVisible() and self.cmb_env.currentText() == "PROD")
 
     def _on_jwt_toggled(self, on: bool) -> None:
         self.edit_jwt.setEnabled(on)
-        self.chk_auto_auth.setEnabled(not on and self.rad_auth.isEnabled())
-        if on:
-            self.chk_auto_auth.setChecked(False)
         self._on_jwt_changed(self.edit_jwt.text())
 
     def _on_jwt_changed(self, text: str) -> None:
@@ -804,11 +893,195 @@ class MainWindow(QMainWindow):
             return
         self.lbl_jwt_state.setText(clean(describe(inspect_jwt(text))))
 
+    def _build_kod2_section(self, pl: QVBoxLayout) -> None:
+        """Rozwijana sekcja „Weryfikacja KODU II” – tylko dla certyfikatu Offline (bez kreatora faktur)."""
+        self.btn_kod2 = QPushButton("Weryfikacja KODU II")
+        self.btn_kod2.setObjectName("btn_kod2")
+        self.btn_kod2.setCheckable(True)
+        self.btn_kod2.setProperty("flat", True)
+        self.btn_kod2.setVisible(False)
+        self._bind_icon(self.btn_kod2.setIcon, "chevron-down", "accent", 16)
+        pl.addWidget(self.btn_kod2, 0, Qt.AlignmentFlag.AlignLeft)
+        self.kod2_box = QFrame()
+        self.kod2_box.setObjectName("kod2_box")
+        self.kod2_box.setVisible(False)
+        kb = QVBoxLayout(self.kod2_box)
+        kb.setContentsMargins(0, 0, 0, 0)
+        kb.setSpacing(SPACE["xs"])
+        inv_lbl = QLabel("Faktura XML (opcjonalnie)")
+        inv_lbl.setProperty("role", "field")
+        kb.addWidget(inv_lbl)
+        row = QHBoxLayout()
+        self.edit_invoice = QLineEdit()
+        self.edit_invoice.setObjectName("edit_invoice")
+        self.edit_invoice.setPlaceholderText("bez faktury: test syntetyczny")
+        self.edit_invoice.setClearButtonEnabled(True)
+        self.btn_invoice = QPushButton("Wybierz…")
+        self.btn_invoice.setObjectName("btn_invoice")
+        self.btn_invoice.clicked.connect(self.choose_invoice)
+        row.addWidget(self.edit_invoice, 1)
+        row.addWidget(self.btn_invoice)
+        kb.addLayout(row)
+        grid = QGridLayout()
+        grid.setHorizontalSpacing(SPACE["sm"])
+        self.edit_kod2_context = QLineEdit()
+        self.edit_kod2_context.setObjectName("edit_kod2_context")
+        self.edit_kod2_context.setPlaceholderText("Kontekst (NIP)")
+        self.edit_kod2_context.setMaxLength(10)
+        self.edit_kod2_seller = QLineEdit()
+        self.edit_kod2_seller.setObjectName("edit_kod2_seller")
+        self.edit_kod2_seller.setPlaceholderText("NIP sprzedawcy")
+        self.edit_kod2_seller.setMaxLength(10)
+        self.cmb_kod2_env = QComboBox()
+        self.cmb_kod2_env.setObjectName("cmb_kod2_env")
+        self.cmb_kod2_env.addItems(["TEST", "DEMO", "PROD"])
+        grid.addWidget(self.edit_kod2_context, 0, 0)
+        grid.addWidget(self.edit_kod2_seller, 0, 1)
+        grid.addWidget(self.cmb_kod2_env, 0, 2)
+        kb.addLayout(grid)
+        self.edit_kod2_link = QLineEdit()
+        self.edit_kod2_link.setObjectName("edit_kod2_link")
+        self.edit_kod2_link.setReadOnly(True)
+        self.edit_kod2_link.setPlaceholderText("link KODU II pojawi się po weryfikacji")
+        kb.addWidget(self.edit_kod2_link)
+        self.btn_kod2_open = QPushButton("Otwórz w KSeF")
+        self.btn_kod2_open.setObjectName("btn_kod2_open")
+        self.btn_kod2_open.setEnabled(False)
+        self.btn_kod2_open.setToolTip(
+            "Otwiera link w przeglądarce. To nie jest weryfikacja: uprawnienia wystawcy ocenia strona KSeF, "
+            "a otwarcie strony ani HTTP 200 nie dowodzi autentyczności wystawcy."
+        )
+        self.btn_kod2_open.clicked.connect(self.open_kod2_link)
+        kb.addWidget(self.btn_kod2_open, 0, Qt.AlignmentFlag.AlignLeft)
+        self.lbl_kod2_note = QLabel(
+            "Bez faktury wykonywany jest syntetyczny test kryptograficzny. Uprawnienia wystawcy potwierdza dopiero KSeF."
+        )
+        self.lbl_kod2_note.setObjectName("lbl_kod2_note")
+        self.lbl_kod2_note.setProperty("role", "muted")
+        self.lbl_kod2_note.setWordWrap(True)
+        kb.addWidget(self.lbl_kod2_note)
+        pl.addWidget(self.kod2_box)
+        self.btn_kod2.toggled.connect(self.kod2_box.setVisible)
+
+    def _pick_invoice(self) -> str:
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Wybierz fakturę XML", "", "Faktura XML (*.xml);;Wszystkie pliki (*)"
+        )
+        return path
+
+    def choose_invoice(self) -> None:
+        if p := self._pick_invoice():
+            self.edit_invoice.setText(p)
+
+    def open_kod2_link(self) -> bool:
+        """Świadoma akcja użytkownika: otwiera wyłącznie oficjalny host QR KSeF; nie jest weryfikacją."""
+        url = self.edit_kod2_link.text()
+        if not url or not kod2.is_official_url(url):
+            return False
+        return bool(QDesktopServices.openUrl(QUrl(url)))
+
+    def _kod2_visibility(self) -> None:
+        show = self._cert_type is CertType.OFFLINE
+        self.btn_kod2.setVisible(show)
+        if not show:
+            self.btn_kod2.setChecked(False)
+            self.edit_kod2_link.clear()
+            self.btn_kod2_open.setEnabled(False)
+
+    def _build_owner_box(self, pl: QVBoxLayout) -> None:
+        """„Właściciel certyfikatu”: kompaktowa tabliczka z danymi z X.509 Subject (bez hasła, bez sieci)."""
+        self.owner_box = QFrame()
+        self.owner_box.setObjectName("ownerBox")
+        self.owner_box.setVisible(False)
+        box = QVBoxLayout(self.owner_box)
+        box.setContentsMargins(SPACE["md"], SPACE["sm"], SPACE["md"], SPACE["sm"])
+        box.setSpacing(SPACE["xs"])
+        head = QHBoxLayout()
+        head.setSpacing(SPACE["sm"])
+        self.lbl_owner_icon = QLabel()
+        self.lbl_owner_icon.setFixedSize(22, 22)
+        self._bind_icon(lambda ic: self.lbl_owner_icon.setPixmap(ic.pixmap(20, 20)), "id-card", "accent", 20)
+        title = QLabel("Właściciel certyfikatu")
+        title.setProperty("role", "field")
+        head.addWidget(self.lbl_owner_icon)
+        head.addWidget(title, 1)
+        box.addLayout(head)
+        grid = QGridLayout()
+        grid.setHorizontalSpacing(SPACE["md"])
+        grid.setVerticalSpacing(2)
+        grid.setColumnStretch(1, 1)
+        self._owner_values: list[tuple[QLabel, QLabel]] = []
+        for r in range(5):
+            key, val = QLabel(), QLabel()
+            key.setProperty("role", "ownerKey")
+            val.setProperty("role", "ownerValue")
+            val.setWordWrap(True)
+            val.setTextFormat(Qt.TextFormat.PlainText)
+            val.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+            val.setObjectName(f"owner_value_{r}")
+            grid.addWidget(key, r, 0, Qt.AlignmentFlag.AlignTop)
+            grid.addWidget(val, r, 1)
+            self._owner_values.append((key, val))
+        box.addLayout(grid)
+        self.lbl_owner_context = QLabel("")
+        self.lbl_owner_context.setObjectName("lbl_owner_context")
+        self.lbl_owner_context.setProperty("role", "muted")
+        self.lbl_owner_context.setWordWrap(True)
+        self.lbl_owner_context.setVisible(False)
+        box.addWidget(self.lbl_owner_context)
+        self.btn_owner_more = QPushButton("Szczegóły certyfikatu")
+        self.btn_owner_more.setObjectName("btn_owner_more")
+        self.btn_owner_more.setProperty("flat", "true")
+        self.btn_owner_more.setCheckable(True)
+        self.btn_owner_more.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._bind_icon(self.btn_owner_more.setIcon, "chevron-down", "accent", 16)
+        box.addWidget(self.btn_owner_more, 0, Qt.AlignmentFlag.AlignLeft)
+        self.lbl_owner_tech = QLabel("")
+        self.lbl_owner_tech.setObjectName("ownerTech")
+        self.lbl_owner_tech.setWordWrap(True)
+        self.lbl_owner_tech.setTextFormat(Qt.TextFormat.PlainText)
+        self.lbl_owner_tech.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        self.lbl_owner_tech.setVisible(False)
+        box.addWidget(self.lbl_owner_tech)
+        self.btn_owner_more.toggled.connect(self.lbl_owner_tech.setVisible)
+        pl.addWidget(self.owner_box)
+
+    def _clear_owner(self) -> None:
+        """Natychmiast usuwa dane poprzedniego certyfikatu (nigdy nie pokazujemy cudzej tożsamości)."""
+        for key, val in self._owner_values:
+            key.setText("")
+            val.setText("")
+        self.lbl_owner_tech.setText("")
+        self.lbl_owner_context.setText("")
+        self.lbl_owner_context.setVisible(False)
+        self.btn_owner_more.setChecked(False)
+        self.owner_box.setVisible(False)
+
+    def _show_owner(self, owner: dict[str, Any], info: Any) -> None:
+        for (key, val), (label, value, missing) in zip(self._owner_values, owner_rows(owner), strict=True):
+            key.setText(label)
+            val.setText(value)
+            val.setProperty("missing", "true" if missing else "false")
+            _repolish(val)
+        self.lbl_owner_tech.setText(tech_text(info))
+        self.owner_box.setVisible(True)
+        self._update_owner_context()
+
+    def _update_owner_context(self) -> None:
+        """Kontekst KSeF to NIP wskazany do uwierzytelnienia – osobne pojęcie niż właściciel certyfikatu."""
+        ctx = self.edit_context.text().strip() if hasattr(self, "edit_context") else ""
+        shown = bool(ctx) and self.owner_box.isVisibleTo(self)
+        self.lbl_owner_context.setText(clean(f"Kontekst KSeF (uwierzytelnienie): NIP {ctx}") if ctx else "")
+        self.lbl_owner_context.setVisible(shown)
+
     def _inspect_cert(self) -> None:
         """Rozpoznaje typ certyfikatu (bez hasła) i dostosowuje dostępne tryby."""
         path = self.edit_cert.text().strip()
         self._cert_type, self._cert_nip = None, None
         self.lbl_cert_type.setVisible(False)
+        self._clear_owner()
+        self.edit_kod2_link.clear()
+        self.btn_kod2_open.setEnabled(False)
         if path and Path(path).suffix.lower() not in (".p12", ".pfx") and Path(path).is_file():
             try:
                 certs = load_file(Path(path)).certificates
@@ -816,6 +1089,8 @@ class MainWindow(QMainWindow):
                 self._cert_type = classify(leaf)[0]
                 info, _ = parse_certificate(leaf)
                 self._cert_nip = info.subject_info.nip
+                _info, notes = parse_certificate(leaf)
+                self._show_owner(owner_info(info, self._cert_type, notes), info)
                 label = {"Authentication": "Authentication", "Offline": "Offline"}.get(
                     self._cert_type.value, "Typ nieustalony"
                 )
@@ -825,11 +1100,8 @@ class MainWindow(QMainWindow):
                     self.edit_context.setPlaceholderText(f"NIP z certyfikatu: {self._cert_nip}")
             except (LoaderError, ValueError):
                 self._cert_type = None
-        self._on_mode_changed()
-        if not self.rad_auth.isEnabled() and self.rad_auth.isChecked():
-            self.rad_local.setChecked(True)
-        if not self.rad_kod2.isEnabled() and self.rad_kod2.isChecked():
-            self.rad_local.setChecked(True)
+        self._kod2_visibility()
+        self._on_online_toggled()
 
     # ---------- dialogi (wydzielone, aby dały się podmienić w testach) ----------
     def _pick_cert(self) -> str:
@@ -1166,16 +1438,13 @@ class MainWindow(QMainWindow):
         self._set_card(
             "trust", "—", "unk", "Zaufanie do wystawcy zostanie sprawdzone po weryfikacji.", "shield-alert"
         )
-        self._set_card(
-            "online", "NIE SPRAWDZONO", "unk", "Tryb offline – bez połączeń sieciowych.", "cloud-off"
-        )
+        self._set_card("online", "NIE SPRAWDZONO", "unk", "Nie sprawdzono.", "cloud-off")
         self.btn_export.setEnabled(False)
         self.btn_copy.setEnabled(False)
 
     # ---------- weryfikacja ----------
     def _online_setup(self) -> OnlineSetup | None:
-        mode = self.current_mode()
-        if mode not in (MODE_ONLINE, MODE_AUTH):
+        if not self.online_enabled():
             return None
         env = self.cmb_env.currentText()
         use_jwt = self.chk_use_jwt.isChecked()
@@ -1213,7 +1482,6 @@ class MainWindow(QMainWindow):
                 "alert-triangle",
             )
             return
-        mode = self.current_mode()
         setup = self._online_setup()
         if setup is not None:
             if setup.mode == "jwt" and not self.edit_jwt.text().strip():
@@ -1237,17 +1505,25 @@ class MainWindow(QMainWindow):
         secret = [password]  # uchwyt czyszczony po zakończeniu zadania (nie zmienna domknięcia)
         provider = CachedPassword(lambda _p, retry: None if retry else secret[0])
         cert_p, key_p = Path(cert), (Path(key) if key else None)
-        kod2_env = self.cmb_env.currentText() if self.online_box.isVisible() else "TEST"
+        kod2_env = self.cmb_kod2_env.currentText()
+        invoice = Path(self.edit_invoice.text().strip()) if self.edit_invoice.text().strip() else None
+        kod2_ctx = self.edit_kod2_context.text().strip() or None
+        kod2_seller = self.edit_kod2_seller.text().strip() or None
+        is_offline = self._cert_type is CertType.OFFLINE  # odczytane PRZED startem zadania (widżety Qt)
 
         def job() -> tuple[FileReport, OnlineSession | None]:
-            if mode == MODE_KOD2 and key_p is not None:
-                # `kod2_env` odczytane PRZED startem zadania – widżetów Qt nie wolno czytać w wątku roboczym
+            if is_offline and key_p is not None:
+                # Offline: lokalny test podpisu KODU II (bez sieci) + ewentualny status online. Środowisko i typ
+                # odczytane PRZED startem zadania – widżetów Qt nie wolno czytać w wątku roboczym.
                 return run_kod2_test(
-                    cert_p, key_p, options, provider, Kod2Setup(kod2_env, "Nip", None, None)
+                    cert_p,
+                    key_p,
+                    options,
+                    provider,
+                    Kod2Setup(kod2_env, "Nip", kod2_ctx, kod2_seller, invoice),
+                    setup,
                 ), None
-            return verify_with_online(
-                cert_p, key_p, options, provider, setup, query_status=(mode != MODE_AUTH)
-            )
+            return verify_with_online(cert_p, key_p, options, provider, setup)
 
         password = None
         self._report = None
@@ -1351,9 +1627,11 @@ class MainWindow(QMainWindow):
             ostate
         ]
         auth = cert.operations.get("authentication")
-        online_sub = cert.checks["online"].summary
+        online_sub = (
+            "Nie sprawdzono." if cert.online_status == "NOT_CHECKED" else cert.checks["online"].summary
+        )
         if auth:
-            online_sub = f"{auth['code']}: {auth['message']}"
+            online_sub = f"{auth['code']}: {auth['message']} ({' · '.join(online_lines(cert)[::3])})"
         self._set_card("online", ow, ostate, online_sub, online_icon)
         for key in self._rows:
             chk = cert.checks[key]
@@ -1366,7 +1644,17 @@ class MainWindow(QMainWindow):
         if kod:
             ops.append(f"Test KODU II: {kod['code']} – {kod['message']}")
             if kod.get("url"):
-                ops.append("Link syntetyczny (dane testowe) – nie używać i nie wysyłać do KSeF.")
+                ops.append(
+                    "Link syntetyczny (dane testowe) – nie używać i nie wysyłać do KSeF."
+                    if kod.get("synthetic")
+                    else "Link zawiera skrót wskazanej faktury (nic nie zostało wysłane do KSeF)."
+                )
+                ops.append(
+                    f"Status w rejestrze: {ONLINE_PL.get(kod['registry_status'], kod['registry_status'])} · "
+                    f"Uprawnienia wystawcy do faktury: NIE ZWERYFIKOWANO – {kod['issuing_authority']['message']}"
+                )
+            self.edit_kod2_link.setText(clean(kod.get("url") or ""))
+            self.btn_kod2_open.setEnabled(bool(kod.get("openable")) and kod.get("status") == "PASS")
         self.lbl_ops.setText(clean("\n".join(ops)))
         self.lbl_result.setText(
             f"Zestaw certyfikatu i klucza – {lw}   ·   Zaufanie do certyfikatu – {tw}   ·   "

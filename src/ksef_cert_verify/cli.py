@@ -269,9 +269,14 @@ def _render_cert(console: Console, fr: FileReport, c: CertReport, verbose: bool)
     t.add_row("Days remaining:", str(c.days_remaining))
     t.add_row("Algorithm:", _s(i.key_algorithm))
     t.add_row("Fingerprint:", _s(i.fingerprint_sha256))
-    name = " ".join([*sub.given_names, sub.surname or ""]).strip() or sub.organization or sub.common_name
-    t.add_row("Podmiot:", _na(name))
+    ow = c.owner
+    t.add_row("Właściciel (X.509):", _na(ow.get("name")))
     t.add_row("NIP / PESEL:", f"{_na(sub.nip)} / {_na(sub.pesel)}")
+    t.add_row("Organizacja:", _na(ow.get("organization")))
+    ctx = c.ksef_context()
+    t.add_row("Kontekst KSeF:", _na(ctx["value"] if ctx else None))
+    api = c.api_subject
+    t.add_row("Podmiot z API:", _na(api.get("common_name") if api else None))
     console.print(t)
     console.print()
 
@@ -308,6 +313,12 @@ def _render_cert(console: Console, fr: FileReport, c: CertReport, verbose: bool)
         console.print(f"{'Authorization:':<22}{_s(auth['authorization'])}")
         for st in auth["steps"]:
             console.print(f"    • {_s(st['name'])}: {_s(st['status'])} – {_s(st['message'])}")
+    if auth:
+        sm = c.summary()
+        console.print(
+            f"{'KSeF accepted cert:':<22}{'YES (XAdES accepted)' if sm['KSEF_AUTHENTICATION'] == 'ACCEPTED' else 'NOT CONFIRMED'}"
+        )
+        console.print(f"{'Registry status:':<22}{_s(sm['KSEF_REGISTRY_STATUS'])}")
     kod = c.operations.get("kod2")
     if kod:
         console.print(f"{'KOD II test:':<22}{_fmt(kod['status'])}  [dim]{_s(kod['message'])}[/dim]")
@@ -428,6 +439,13 @@ def verify(
     token_env: Annotated[
         str, typer.Option("--token-env", help="Zmienna środowiskowa z tokenem dostępu.")
     ] = "KSEF_ACCESS_TOKEN",
+    fetch_certificate: Annotated[
+        bool,
+        typer.Option(
+            "--fetch-certificate",
+            help="Z --online: pobierz certyfikat z rejestru KSeF i porównaj SHA-256 DER (1 dodatkowe żądanie).",
+        ),
+    ] = False,
     confirm_prod: Annotated[
         bool, typer.Option("--confirm-prod", help="Świadome potwierdzenie użycia środowiska PRODUKCYJNEGO.")
     ] = False,
@@ -459,6 +477,7 @@ def verify(
     opts = _build_options(trust_anchor, no_default_trust, expected_type, allow_unencrypted_key, at, err)
     setup = _online_setup(online, environment, confirm_prod, context_nip, token_env, err)
     provider = make_password_provider(password_stdin, password_fd)
+    opts.online_fetch_certificate = fetch_certificate
     report, _session = verify_with_online(cert, key, opts, provider, setup)
     reports = [report]
     code = exit_code(reports)
@@ -704,22 +723,50 @@ def test_kod2(
     ] = "TEST",
     context_nip: Annotated[str | None, typer.Option("--context-nip")] = None,
     seller_nip: Annotated[str | None, typer.Option("--seller-nip")] = None,
+    context_type: Annotated[
+        str, typer.Option("--context-type", help="Nip | InternalId | NipVatUe | PeppolId (domyślnie Nip).")
+    ] = "Nip",
+    invoice: Annotated[
+        Path | None,
+        typer.Option(
+            "--invoice", help="Opcjonalna faktura XML: link zawiera jej SHA-256 (plik nie jest wysyłany)."
+        ),
+    ] = None,
+    ec_format: Annotated[
+        str, typer.Option("--ec-format", help="ECDSA: p1363 (rekomendowany) | der. RSA-PSS ignoruje.")
+    ] = "p1363",
+    open_link: Annotated[
+        bool,
+        typer.Option(
+            "--open",
+            help="Po poprawnym teście otwórz link w przeglądarce (świadoma akcja; to nie jest weryfikacja).",
+        ),
+    ] = False,
     password_stdin: Annotated[bool, typer.Option("--password-stdin")] = False,
     password_fd: Annotated[int | None, typer.Option("--password-fd")] = None,
     allow_unencrypted_key: Annotated[bool, typer.Option("--allow-unencrypted-key")] = False,
     json_out: Annotated[bool, typer.Option("--json")] = False,
 ) -> None:
-    """Test podpisu KODU II (certyfikat Offline) na danych SYNTETYCZNYCH, wg `kody-qr.md`.
+    """Test podpisu KODU II (certyfikat Offline), wg `kody-qr.md`.
 
-    Nic nie jest wysyłane do KSeF; link jest tylko budowany i lokalnie weryfikowany. Exit: 0 poprawny, 1 niepoprawny,
-    2 błąd/niezastosowalny (np. certyfikat Authentication), 3 nieustalony (np. brak hasła).
+    Bez --invoice to SYNTETYCZNY test kryptograficzny (bez faktury). Z --invoice link zawiera skrót pliku faktury.
+    Nic nie jest wysyłane do KSeF; uprawnienia wystawcy sprawdza dopiero KSeF po otwarciu linku (brak API).
+    Exit: 0 poprawny, 1 niepoprawny, 2 błąd/niezastosowalny (np. certyfikat Authentication), 3 nieustalony.
     """
     err = _console(stderr=True)
     opts, provider = _pair_options(cert, key, password_stdin, password_fd, allow_unencrypted_key, None, err)
     env = environment.upper()
     if env not in ("TEST", "DEMO", "PROD"):
         raise typer.BadParameter("TEST, DEMO albo PROD", param_hint="--environment")
-    report = run_kod2_test(cert, key, opts, provider, Kod2Setup(env, "Nip", context_nip, seller_nip))
+    if ec_format not in ("p1363", "der"):
+        raise typer.BadParameter("p1363 albo der", param_hint="--ec-format")
+    report = run_kod2_test(
+        cert,
+        key,
+        opts,
+        provider,
+        Kod2Setup(env, context_type, context_nip, seller_nip, invoice, ec_format),
+    )
     if report.error or not report.certificates:
         err.print(f"[red]Błąd:[/red] {_s(report.error.message if report.error else 'brak certyfikatu')}")
         raise typer.Exit(2 if report.error and report.error.kind == "runtime" else 1)
@@ -743,9 +790,29 @@ def test_kod2(
         f"{'KOD II:':<20}{_fmt(op['status'] if op['status'] in ('PASS', 'FAIL') else 'UNKNOWN')}  [bold]{_s(op['code'])}[/bold] {_s(op['message'])}",
     ]
     if op.get("url"):
-        lines.append(f"{'Test link:':<20}[dim]{_s(op['url'])}[/dim]")
-        lines.append("[dim]Link syntetyczny – NIE używać i NIE wysyłać do KSeF.[/dim]")
+        lines.append(f"{'Test kind:':<20}{_s(op.get('kind'))}  [dim]{_s(op.get('signature_format'))}[/dim]")
+        lines.append(f"{'Link:':<20}[dim]{_s(op['url'])}[/dim]")
+        lines.append(
+            f"{'Registry status:':<20}{_s(op.get('registry_status'))}  [dim](osobno od uprawnień do faktury)[/dim]"
+        )
+        lines.append(
+            f"{'Issuing authority:':<20}{_s(op['issuing_authority']['status'])}  [dim]{_s(op['issuing_authority']['message'])}[/dim]"
+        )
+        if op.get("synthetic"):
+            lines.append("[dim]Link syntetyczny – NIE używać i NIE wysyłać do KSeF.[/dim]")
     _emit(_console(), json_out, doc, lines)
+    if open_link and op.get("url") and op["status"] == "PASS":
+        if not op.get("openable"):
+            err.print(
+                "[yellow]Link nie zostanie otwarty[/yellow] (nieoficjalny host albo PROD bez pliku faktury)."
+            )
+        else:
+            import webbrowser
+
+            webbrowser.open(op["url"])
+            err.print(
+                "Otwarto link w przeglądarce. [bold]To nie potwierdza autentyczności wystawcy[/bold] – oceń wynik na stronie KSeF."
+            )
     if op["status"] == "PASS":
         raise typer.Exit(0)
     if op["code"] == "KOD2_NOT_APPLICABLE":

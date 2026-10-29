@@ -10,7 +10,7 @@ from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.asymmetric import dsa, ec, ed448, ed25519, rsa
 from cryptography.x509.oid import NameOID
 
-from .models import CertInfo, ExtensionInfo, SubjectInfo
+from .models import CertInfo, CertType, ExtensionInfo, SubjectInfo
 
 OID_ORG_IDENTIFIER = x509.ObjectIdentifier("2.5.4.97")
 OID_UNIQUE_IDENTIFIER = x509.ObjectIdentifier("2.5.4.45")
@@ -205,6 +205,43 @@ def serial_hex(cert: x509.Certificate) -> str:
     """Hex; dla numerów mieszczących się w 64 bitach dopełniony do 16 znaków (format z API KSeF)."""
     n = cert.serial_number
     return f"{n:016X}" if 0 <= n < 1 << 64 else f"{n:X}"
+
+
+def owner_info(
+    info: CertInfo, cert_type: CertType | str, notes: list[str] | None = None
+) -> dict[str, object]:
+    """Właściciel certyfikatu = WYŁĄCZNIE dane z X.509 Subject (bez gadania z API, bez zgadywania).
+
+    To nie jest „kontekst KSeF" (NIP wskazany do uwierzytelnienia) ani „podmiot z API" (dane zwrócone przez rejestr);
+    nazwa własna certyfikatu nadana w KSeF nie jest dowodem tożsamości właściciela. Brak danych = None."""
+    s = info.subject_info
+    person = " ".join([*s.given_names, s.surname or ""]).strip()
+    name = person or s.organization or s.common_name or None
+    return {
+        "source": "X.509 Subject",
+        "kind": s.kind,
+        "name": name,
+        "given_names": list(s.given_names),
+        "surname": s.surname,
+        "organization": s.organization,
+        "common_name": s.common_name,
+        "nip": s.nip,
+        "pesel": s.pesel,
+        "organization_identifier": s.organization_identifier,
+        "country": s.country,
+        "certificate_type": getattr(cert_type, "value", cert_type),
+        "not_after": info.not_after,
+        "notes": list(notes or []),
+    }
+
+
+def api_serial(cert: x509.Certificate) -> str | None:
+    """Numer seryjny X.509 w formacie `certificateSerialNumber` API KSeF (`^[0-9A-F]{16}$`).
+
+    Konwersja bez utraty informacji: liczba nieujemna mieszcząca się w 64 bitach → 16 znaków HEX z zerami wiodącymi.
+    Inny numer (ujemny, dłuższy) nie ma w API reprezentacji → None (nie wolno go obcinać ani zgadywać)."""
+    n = cert.serial_number
+    return f"{n:016X}" if 0 <= n < 1 << 64 else None
 
 
 def iso(dt: datetime) -> str:

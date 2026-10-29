@@ -17,19 +17,19 @@ x-circle i ikony przycisków; kolory z aktualnego motywu, ostre na HiDPI), logo 
   i jest czyszczone po każdej weryfikacji. Przeciągnięcie plików na okno uzupełnia pola.
 * **Zaufane CA…** – dodawanie CA wymaga potwierdzenia odcisku SHA-256 i certyfikatu z `CA=TRUE`.
 
-## Tryb
+## Weryfikacja
 
-| Tryb | Co robi |
-|---|---|
-| Weryfikacja lokalna | LOCAL + TRUST, bez sieci |
-| Weryfikacja lokalna + status online | j.w. + status w KSeF; dla Authentication – **automatyczne uwierzytelnienie** (XAdES) |
-| Test uwierzytelnienia online (Authentication) | tylko uwierzytelnienie, bez zapytania o status; dostępne tylko dla Authentication |
-| Test podpisu KODU II (Offline) | podpis KODU II na danych syntetycznych; dostępne tylko dla Offline |
+**Weryfikuj** zawsze wykonuje weryfikację lokalną (certyfikat, ważność, klucz i hasło, dopasowanie pary, test podpisu, typ, profil KSeF,
+zaufanie PKI w zakresie dostępnych danych) – bez możliwości jej wyłączenia i bez sieci.
 
-Opcje online: **Środowisko** TEST (domyślnie) / DEMO / PROD – wybór PROD pokazuje ostrzeżenie i wymaga wpisania słowa `PROD`;
-**Kontekst (NIP)** (domyślnie NIP z certyfikatu); **Automatyczne uwierzytelnienie w KSeF**. W sekcji **Zaawansowane**:
-**Użyj istniejącego tokena JWT** (z objaśnieniem: co to jest accessToken i skąd pochodzi; wstępna kontrola struktury i terminu ważności;
-autentyczność weryfikuje dopiero API). Certyfikat Offline nie oferuje uwierzytelnienia XAdES.
+**Sprawdź również online w KSeF** (domyślnie wyłączone – brak żądań HTTP). Po zaznaczeniu: **Środowisko** TEST (domyślnie) / DEMO / PROD
+(PROD wymaga wpisania słowa `PROD`), **Kontekst (NIP)** (domyślnie NIP z certyfikatu). Authentication: automatyczne uwierzytelnienie
+XAdES i status w rejestrze. Offline: bez uwierzytelniania certyfikatem Offline – status w rejestrze wymaga uprawnionego JWT. W sekcji
+**Zaawansowane**: **Użyj istniejącego tokena JWT** (wstępna kontrola struktury i terminu; autentyczność weryfikuje dopiero API).
+
+**Weryfikacja KODU II** (rozwijana, tylko dla certyfikatu Offline): opcjonalna faktura XML, kontekst, NIP sprzedawcy, środowisko, link
+i **Otwórz w KSeF** (świadoma akcja, tylko oficjalny host QR). Bez faktury – syntetyczny test kryptograficzny. Uprawnień wystawcy nie
+weryfikujemy (MF nie udostępnia maszynowego interfejsu) – ocenia je strona KSeF po otwarciu linku.
 
 ## Wynik (prawy panel)
 

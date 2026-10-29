@@ -201,7 +201,6 @@ def test_no_network_by_default(tmp_path, ca, auth_cert, monkeypatch):
     [
         ({"validTo": "2031-01-01T00:00:00+00:00"}, "ważny do"),
         ({"validFrom": "2020-01-01T00:00:00+00:00"}, "ważny od"),
-        ({"commonName": "Ktoś Inny"}, "commonName"),
         ({"subjectIdentifier": {"type": "Pesel", "value": "11111111111"}}, "PESEL"),
     ],
 )
@@ -237,3 +236,139 @@ def test_matching_metadata_reports_active_with_reasons(tmp_path, ca, auth_cert):
         and c.checks["online"].code == "KSEF_ACTIVE"
         and c.verdict is Verdict.VALID
     )
+
+
+def _run(tmp_path, ca, auth_cert, handler):
+    p = tmp_path / "a.pem"
+    p.write_bytes(pem(auth_cert[0]))
+    kp = write_key(tmp_path / "a.key", auth_cert[1])
+    r = verify_file(p, _opts(ca, client(handler)), lambda *_a: KEY_PASSWORD, key_path=kp)
+    return r.certificates[0]
+
+
+def test_different_common_name_does_not_block_match(tmp_path, ca, auth_cert):
+    """commonName/nazwa własna z rejestru to nie identyfikator: serial+typ+terminy wystarczają, CN → tylko uwaga."""
+    c = _run(
+        tmp_path,
+        ca,
+        auth_cert,
+        lambda r: ok([item_for(auth_cert[0], "Active", commonName="Ktoś Inny", name="Moja")]),
+    )
+    assert c.online_status == "Active" and c.verdict is Verdict.VALID
+    codes = {f.code: f for f in c.checks["online"].findings}
+    assert codes["ONLINE_CN_DIFFERS"].status is CheckStatus.WARNING
+    assert "Moja" in codes["ONLINE_CN_DIFFERS"].message
+
+
+def test_serial_is_normalized_to_16_hex_and_pages_are_followed(tmp_path, ca, auth_cert):
+    from ksef_cert_verify.core.certificate_parser import api_serial
+
+    serial = api_serial(auth_cert[0])
+    assert serial and len(serial) == 16 and serial == serial.upper()
+    seen = []
+
+    def h(req):
+        seen.append((req.url.params["pageOffset"], json.loads(req.content)))
+        if len(seen) == 1:
+            return httpx.Response(
+                200, json={"certificates": [item("Active", serial="FFFFFFFFFFFFFFFF")], "hasMore": True}
+            )
+        return ok([item_for(auth_cert[0], "Active")])
+
+    c = _run(tmp_path, ca, auth_cert, h)
+    assert [x[0] for x in seen] == ["0", "1"] and all(
+        x[1] == {"certificateSerialNumber": serial} for x in seen
+    )
+    assert c.online_status == "Active"
+
+
+def test_pagination_is_bounded():
+    n = []
+
+    def h(req):
+        n.append(1)
+        return httpx.Response(200, json={"certificates": [], "hasMore": True})
+
+    out = client(h).lookup(SERIAL)
+    assert len(n) == 5 and out.status == "UNKNOWN"
+
+
+def test_der_mismatch_means_other_certificate_not_error(tmp_path, ca, auth_cert, no_such=None):
+    import base64
+
+    def h(req):
+        if req.url.path.endswith("/retrieve"):
+            return httpx.Response(
+                200,
+                json={
+                    "certificates": [
+                        {
+                            "certificate": base64.b64encode(b"inny").decode(),
+                            "certificateName": "x",
+                            "certificateSerialNumber": item_for(auth_cert[0], "Active")[
+                                "certificateSerialNumber"
+                            ],
+                            "certificateType": "Authentication",
+                        }
+                    ]
+                },
+            )
+        return ok([item_for(auth_cert[0], "Active", validTo="2031-01-01T00:00:00+00:00")])
+
+    c = _run(tmp_path, ca, auth_cert, h)
+    assert c.online_status == "UNKNOWN" and c.verdict is Verdict.INDETERMINATE
+    assert "nie da się go przypisać" in c.checks["online"].summary
+
+
+def test_der_match_confirms_status_despite_metadata_gap(tmp_path, ca, auth_cert):
+    import base64
+
+    from cryptography.hazmat.primitives.serialization import Encoding
+
+    der = auth_cert[0].public_bytes(Encoding.DER)
+
+    def h(req):
+        if req.url.path.endswith("/retrieve"):
+            return httpx.Response(
+                200,
+                json={
+                    "certificates": [
+                        {
+                            "certificate": base64.b64encode(der).decode(),
+                            "certificateName": "x",
+                            "certificateSerialNumber": item_for(auth_cert[0], "Active")[
+                                "certificateSerialNumber"
+                            ],
+                            "certificateType": "Authentication",
+                        }
+                    ]
+                },
+            )
+        return ok([item_for(auth_cert[0], "Revoked", validTo="2031-01-01T00:00:00+00:00")])
+
+    c = _run(tmp_path, ca, auth_cert, h)
+    assert c.online_status == "Revoked" and c.verdict is Verdict.INVALID
+
+
+def test_not_in_registry_for_non_ksef_issuer_is_not_applicable(tmp_path, ca, auth_cert):
+    c = _run(tmp_path, ca, auth_cert, lambda r: ok([]))
+    assert c.online_status == "NOT_APPLICABLE" and c.checks["online"].status is CheckStatus.NOT_CHECKED
+    assert "oczekiwany" in c.checks["online"].summary
+
+
+def test_not_in_registry_for_ksef_issuer_is_not_found_not_error(tmp_path):
+    from tests.conftest import make_ca, make_leaf
+
+    kca = make_ca("TEST CCK KSeF")
+    cert, key = make_leaf(kca)
+    p = tmp_path / "a.pem"
+    p.write_bytes(pem(cert))
+    kp = write_key(tmp_path / "a.key", key)
+    r = verify_file(p, _opts(kca, client(lambda r: ok([]))), lambda *_a: KEY_PASSWORD, key_path=kp)
+    c = r.certificates[0]
+    assert c.online_status == "NOT_FOUND" and c.checks["online"].status is not CheckStatus.FAIL
+
+
+def test_registry_access_denied_is_unknown_and_authorization_denied():
+    out = client(lambda r: httpx.Response(403, json={})).lookup(SERIAL)
+    assert out.status == "UNKNOWN" and out.authorization == "DENIED"

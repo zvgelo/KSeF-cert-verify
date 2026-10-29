@@ -1,10 +1,12 @@
 ; Inno Setup 6 – instalator KSeF-cert-verify (Windows 10/11 x64).
-; Budowanie:  ISCC.exe /DAppVersion=1.0.0 packaging\windows\KSeF-cert-verify.iss   (lub packaging\windows\build.ps1)
+; Budowanie:  ISCC.exe /DAppVersion=<wersja> packaging\windows\KSeF-cert-verify.iss   (lub packaging\windows\build.ps1)
 ; Wejście:    dist\ksef-cert-verify\  (wynik scripts\build.py – PyInstaller: CLI + GUI + PySide6, bez Pythona)
 ; Wynik:      dist\KSeF-cert-verify-<wersja>-windows-x64-setup.exe
 
+; Wersja pochodzi z projektu (ksef_cert_verify.__version__) i jest przekazywana przez build.ps1 (/DAppVersion=...).
+; Brak wartości domyślnej celowo: nie wolno wpisywać numeru wersji ręcznie w wielu miejscach.
 #ifndef AppVersion
-  #define AppVersion "1.0.0"
+  #error Brak /DAppVersion=<wersja> (uruchom packaging\windows\build.ps1 – odczytuje wersję z projektu).
 #endif
 ; Nazwa wyświetlana produktu. Stałe identyfikatory (AppId, nazwy plików wyjściowych, polecenie CLI) pozostają bez zmian.
 #define AppName "KSeF CertVerify"
@@ -30,7 +32,11 @@ VersionInfoDescription={#AppName} – {#AppSubtitle}
 PrivilegesRequired=lowest
 PrivilegesRequiredOverridesAllowed=dialog commandline
 DefaultDirName={autopf}\{#AppName}
+; Aktualizacja = ta sama instalacja: katalog, tryb (per-user/systemowy), zadania i język zapamiętane z poprzedniej wersji.
 UsePreviousAppDir=yes
+UsePreviousPrivileges=yes
+UsePreviousTasks=yes
+UsePreviousLanguage=yes
 DisableProgramGroupPage=yes
 DisableDirPage=no
 ArchitecturesAllowed=x64compatible
@@ -47,6 +53,7 @@ SolidCompression=yes
 WizardStyle=modern
 ; Aktualizacja: zamknij uruchomioną aplikację przed podmianą plików, bez wymuszania restartu systemu.
 CloseApplications=yes
+CloseApplicationsFilter=*.exe,*.dll,*.pyd
 RestartApplications=no
 ChangesEnvironment=yes
 ; Instalator NIE jest podpisany cyfrowo (patrz docs/INSTALL_WINDOWS.md). Nie wyłączamy SmartScreen ani
@@ -59,6 +66,14 @@ Name: "english"; MessagesFile: "compiler:Default.isl"
 [Tasks]
 Name: "desktopicon"; Description: "Utwórz skrót na &pulpicie"; GroupDescription: "Skróty:"; Flags: unchecked
 Name: "addtopath"; Description: "Dodaj wiersz poleceń (ksef-cert-verify) do zmiennej &PATH"; GroupDescription: "Wiersz poleceń:"; Flags: unchecked
+
+[InstallDelete]
+; Usuń pliki poprzedniej wersji, których nowa nie zawiera (PyInstaller: katalog _internal i pliki EXE).
+; Ustawienia użytkownika są poza katalogiem programu (rejestr HKCU / profil), więc zostają nietknięte.
+Type: filesandordirs; Name: "{app}\_internal"
+Type: files; Name: "{app}\{#GuiExe}"
+Type: files; Name: "{app}\{#CliExe}"
+; (unins000.exe/.dat NIE są ruszane – należą do mechanizmu odinstalowania Inno Setup)
 
 [Files]
 Source: "..\..\dist\ksef-cert-verify\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs

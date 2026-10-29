@@ -99,7 +99,7 @@ Pola nie są usuwane ani przemianowywane w obrębie wersji; zmiana łamiąca pod
 ```json
 {
   "schema_version": "2",
-  "tool": {"name": "ksef-cert-verify", "version": "1.0.0"},
+  "tool": {"name": "ksef-cert-verify", "version": "1.0.1"},
   "generated_at": "2026-10-28T12:00:00Z",
   "scope": {"offline": true, "online_requested": false, "online_environment": null,
             "trust_anchors_configured": 1, "expected_type": null},
@@ -154,6 +154,14 @@ Domyślne środowisko: TEST.
 `kody-qr.md` (`https://qr-test.ksef.mf.gov.pl/certificate/<typ>/<kontekst>/<NIP sprzedawcy>/<serial>/<SHA-256 faktury>/<podpis>`),
 podpisuje ścieżkę (bez `https://` i końcowego `/`) i weryfikuje lokalnie; sprawdza też, że zmiana danych unieważnia podpis. Dane są
 **syntetyczne**, link nie jest nigdzie wysyłany ani otwierany. Certyfikat Authentication → `KOD2_NOT_APPLICABLE` (exit 2).
+
+Opcje: `--invoice F.xml` (link zawiera SHA-256 pliku faktury; NIP sprzedawcy z `Podmiot1`), `--context-type`, `--ec-format p1363|der`
+(oba kodowania ECDSA z dokumentacji MF są weryfikowane), `--open` (świadome otwarcie linku w przeglądarce, tylko oficjalny host QR).
+Bez `--invoice` to **syntetyczny test kryptograficzny**. Wynik rozdziela status w rejestrze (`registry_status`) od uprawnień do
+wystawienia faktury (`issuing_authority: NOT_VERIFIED`): MF nie udostępnia udokumentowanego, maszynowego interfejsu weryfikacji KODU II
+(brak endpointu w OpenAPI), więc program nie parsuje HTML i nie deklaruje potwierdzenia. Otwarcie strony ani HTTP 200 nie dowodzi
+autentyczności wystawcy.
+
 
 ## `trust`
 

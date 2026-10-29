@@ -7,17 +7,19 @@ from datetime import datetime, timedelta
 from typing import Protocol
 
 from cryptography import x509
-from cryptography.hazmat.primitives import hashes
+from cryptography.hazmat.primitives import hashes, serialization
 
 from .certificate_classifier import classify
 from .certificate_parser import (
     KNOWN_EXTENSION_OIDS,
     KSEF_DN_OIDS,
     OID_ORG_IDENTIFIER,
+    api_serial,
     aware,
     key_description,
     not_after,
     not_before,
+    owner_info,
     parse_certificate,
 )
 from .models import (
@@ -30,7 +32,7 @@ from .models import (
     Verdict,
 )
 from .private_key import SignatureEvidence, match_check, signature_check, spki_of_certificate
-from .trust_store import TrustStore, validate_chain
+from .trust_store import ISSUER_KSEF, TrustStore, validate_chain
 
 EXPIRY_THRESHOLDS = (7, 14, 30)
 MAX_VALIDITY_DAYS = 2 * 366  # „maks. 2 lata” – źródło: ksef.podatki.gov.pl (nie repo API)
@@ -52,6 +54,8 @@ MANDATORY_OFFLINE = (
 class OnlineLookup(Protocol):
     def lookup(self, serial_hex16: str) -> OnlineOutcome: ...
 
+    # Opcjonalnie (sprawdzane przez hasattr): def retrieve_der(self, serial_hex16: str) -> tuple[bytes | None, str]
+
 
 @dataclass
 class OnlineOutcome:
@@ -62,9 +66,11 @@ class OnlineOutcome:
     api_type: str | None = None
     api_valid_from: str | None = None
     api_valid_to: str | None = None
-    api_common_name: str | None = None
+    api_common_name: str | None = None  # CN podmiotu wg rejestru (NIE nazwa własna certyfikatu)
+    api_name: str | None = None  # nazwa własna nadana przy rejestracji certyfikatu
     api_subject_id_type: str | None = None  # Nip | Pesel | Fingerprint
     api_subject_id_value: str | None = None
+    authorization: str | None = None  # GRANTED (HTTP 200 z rejestru) | DENIED (403) | None (nieustalone)
 
 
 @dataclass
@@ -82,6 +88,7 @@ class VerifyContext:
         False  # użytkownik zażądał statusu online (nawet jeśli sesji nie udało się uzyskać)
     )
     online_note: str | None = None
+    online_fetch_certificate: bool = False  # zawsze porównuj DER z /certificates/retrieve (dodatkowe żądanie)
     inputs: Check | None = None  # kompletność danych wejściowych (certyfikat, klucz, hasło)
 
 
@@ -274,9 +281,7 @@ def _metadata_mismatches(cert: x509.Certificate, info: CertInfo, out: OnlineOutc
         parsed = _parse_api_dt(api_val)
         if api_val and (parsed is None or abs(parsed - local) > tol):
             bad.append(f"{label}: API {api_val} ≠ certyfikat {local.strftime('%Y-%m-%dT%H:%M:%SZ')}")
-    cn = info.subject_info.common_name
-    if out.api_common_name and cn and out.api_common_name != cn:
-        bad.append("commonName różni się")
+    # commonName z API celowo NIE jest tu porównywane: to nie identyfikator (patrz _cn_note).
     sid = info.subject_info
     if out.api_subject_id_type == "Nip" and sid.nip and out.api_subject_id_value != sid.nip:
         bad.append("identyfikator NIP różni się")
@@ -285,24 +290,45 @@ def _metadata_mismatches(cert: x509.Certificate, info: CertInfo, out: OnlineOutc
     return bad
 
 
+def _cn_note(info: CertInfo, out: OnlineOutcome) -> str | None:
+    """Różnica CN/nazwa własna – wyłącznie informacja (nie wpływa na dopasowanie ani status)."""
+    cn = info.subject_info.common_name
+    if out.api_common_name and cn and out.api_common_name != cn:
+        extra = f"; nazwa własna certyfikatu w rejestrze: „{out.api_name}”" if out.api_name else ""
+        return (
+            f"commonName w rejestrze („{out.api_common_name}”) różni się od CN w certyfikacie („{cn}”){extra}. "
+            "To nie identyfikator – dopasowanie opiera się na numerze seryjnym, typie i terminach."
+        )
+    return None
+
+
 def _online_check(
-    cert: x509.Certificate, ctx: VerifyContext, cert_type: CertType, info: CertInfo
-) -> tuple[Check, str]:
+    cert: x509.Certificate, ctx: VerifyContext, cert_type: CertType, info: CertInfo, issuer: str
+) -> tuple[Check, str, dict | None]:
     if ctx.online is None:
         if ctx.online_requested:
             msg = (
                 ctx.online_note
                 or "Zażądano statusu online, ale nie uzyskano dostępu do API – status nieustalony."
             )
-            return Check(
-                "online",
-                CheckStatus.UNKNOWN,
-                msg,
-                [Finding("ONLINE_UNAVAILABLE", CheckStatus.UNKNOWN, msg)],
-                code="KSEF_UNKNOWN",
-            ), "UNKNOWN"
-        return Check("online", CheckStatus.NOT_CHECKED, "Status w KSeF nie był sprawdzany."), "NOT_CHECKED"
-    if cert.serial_number < 0 or cert.serial_number > 0xFFFFFFFFFFFFFFFF:
+            return (
+                Check(
+                    "online",
+                    CheckStatus.UNKNOWN,
+                    msg,
+                    [Finding("ONLINE_UNAVAILABLE", CheckStatus.UNKNOWN, msg)],
+                    code="KSEF_UNKNOWN",
+                ),
+                "UNKNOWN",
+                None,
+            )
+        return (
+            Check("online", CheckStatus.NOT_CHECKED, "Status w KSeF nie był sprawdzany."),
+            "NOT_CHECKED",
+            None,
+        )
+    serial = api_serial(cert)
+    if serial is None:
         return (
             Check(
                 "online",
@@ -310,33 +336,70 @@ def _online_check(
                 "Numer seryjny nie mieści się w formacie 16 znaków hex – nie można zapytać API.",
             ),
             "UNKNOWN",
+            None,
         )
-    out = ctx.online.lookup(f"{cert.serial_number:016X}")
+    out = ctx.online.lookup(serial)
     findings: list[Finding] = []
     reported = out.status
     if out.status in ("Active", "Blocked", "Revoked", "Expired"):
         mismatches = _metadata_mismatches(cert, info, out)
-        if mismatches:
-            # Odpowiedź API (nawet HTTP 200 z numerem seryjnym) bez zgodnych metadanych nie jest wiarygodnym dopasowaniem.
+        same_cert: bool | None = None  # None = brak dowodu DER
+        retrieve = getattr(ctx.online, "retrieve_der", None)
+        if retrieve is not None and (mismatches or ctx.online_fetch_certificate):
+            der, why = retrieve(serial)
+            if der is None:
+                findings.append(Finding("ONLINE_RETRIEVE_FAILED", CheckStatus.WARNING, why))
+            else:
+                same_cert = der == cert.public_bytes(serialization.Encoding.DER)
+                if same_cert:
+                    findings.append(
+                        Finding(
+                            "ONLINE_DER_MATCH",
+                            CheckStatus.PASS,
+                            "Pełny certyfikat (DER) z rejestru jest identyczny z badanym (zgodny SHA-256).",
+                        )
+                    )
+        if same_cert is False or (same_cert is None and mismatches):
+            # Rejestr ma inny certyfikat o tym numerze albo nie da się tego rozstrzygnąć: to nie jest dopasowanie.
             reported = "UNKNOWN"
+            why = (
+                "pełny certyfikat z rejestru różni się od badanego"
+                if same_cert is False
+                else "; ".join(mismatches)
+            )
             findings.append(
                 Finding(
-                    "ONLINE_METADATA_MISMATCH",
+                    "ONLINE_NOT_MATCHED",
                     CheckStatus.UNKNOWN,
-                    "Rekord z API nie zgadza się z certyfikatem (" + "; ".join(mismatches) + ") – "
-                    "nie można wiarygodnie dopasować, status nie jest potwierdzony.",
+                    f"Rejestr zawiera wpis o tym numerze seryjnym, ale nie da się go przypisać do badanego "
+                    f"certyfikatu ({why}). Status nie został potwierdzony – to nie oznacza, że certyfikat jest "
+                    "niepoprawny.",
                 )
             )
-        elif out.status == "Active":
-            pass
         else:
-            findings.append(
-                Finding(
-                    "ONLINE_" + out.status.upper(),
-                    CheckStatus.FAIL,
-                    f"Status w KSeF: {out.status}. {out.message}".strip(),
+            note = _cn_note(info, out)
+            if note:
+                findings.append(Finding("ONLINE_CN_DIFFERS", CheckStatus.WARNING, note))
+            if out.status != "Active":
+                findings.append(
+                    Finding(
+                        "ONLINE_" + out.status.upper(),
+                        CheckStatus.FAIL,
+                        f"Status w KSeF: {out.status}. {out.message}".strip(),
+                    )
                 )
+    elif out.status == "NOT_FOUND" and issuer != ISSUER_KSEF:
+        # Certyfikat spoza KSeF (np. samopodpisany akceptowany w TEST) nie musi istnieć w rejestrze.
+        reported = "NOT_APPLICABLE"
+        findings.append(
+            Finding(
+                "ONLINE_NOT_APPLICABLE",
+                CheckStatus.NOT_CHECKED,
+                "Certyfikat nie został wystawiony przez KSeF (Issuer: "
+                f"{'samopodpisany' if issuer == 'SELF_SIGNED' else 'inny urząd certyfikacji'}), więc brak wpisu "
+                "w rejestrze KSeF jest oczekiwany. Rejestr nie dotyczy tego certyfikatu.",
             )
+        )
     else:
         findings.append(Finding("ONLINE_UNKNOWN", CheckStatus.UNKNOWN, out.message))
     if (
@@ -353,13 +416,30 @@ def _online_check(
             )
         )
     summary = (
-        "Status w KSeF: Active (numer seryjny, typ, daty ważności i dane podmiotu zgodne z certyfikatem)."
+        "Status w KSeF: Active (numer seryjny, typ i terminy ważności zgodne z certyfikatem)."
         if reported == "Active"
+        else findings[-1].message
+        if reported == "NOT_APPLICABLE" or (reported == "UNKNOWN" and findings)
         else out.message
     )
     check = Check.from_findings("online", findings, summary)
     check.code = f"KSEF_{reported.upper()}"
-    return check, reported
+    record = None
+    if reported in (
+        "Active",
+        "Blocked",
+        "Revoked",
+        "Expired",
+    ):  # tylko jednoznacznie dopasowany wpis rejestru
+        record = {
+            "source": "API KSeF /certificates/query",
+            "status": reported,
+            "common_name": out.api_common_name,
+            "certificate_name": out.api_name,  # nazwa własna nadana w KSeF – NIE dowód tożsamości
+            "certificate_type": out.api_type,
+            "subject_identifier": {"type": out.api_subject_id_type, "value": out.api_subject_id_value},
+        }
+    return check, reported, record
 
 
 def aggregate(checks: dict[str, Check], online_requested: bool) -> Verdict:
@@ -413,7 +493,7 @@ def verify_certificate(
         )
 
     profile = _profile_check(cert, cert_type, subject_notes)
-    online, online_status = _online_check(cert, ctx, cert_type, info)
+    online, online_status, api_subject = _online_check(cert, ctx, cert_type, info, chain.issuer_kind)
     key_decrypt = ctx.key_decrypt or Check(
         "key_decrypt", CheckStatus.NOT_CHECKED, "Nie podano klucza prywatnego – pełna weryfikacja niemożliwa."
     )
@@ -448,4 +528,6 @@ def verify_certificate(
         verdict=verdict,
         online_status=online_status,
         chain=chain.path,
+        owner=owner_info(info, cert_type, subject_notes),
+        api_subject=api_subject,
     )

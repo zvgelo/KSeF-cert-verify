@@ -162,6 +162,13 @@ QLabel[role="cardStatus"][state="warn"] {{ color: {c["warn_fg"]}; }}
 QLabel[role="cardStatus"][state="unk"] {{ color: {c["unk_fg"]}; }}
 QLabel[role="sectionHeader"] {{ font-weight: 700; font-size: {SCALE["body"]}px; letter-spacing: 0.5px; color: {c["accent"]}; }}
 QFrame[role="rule"] {{ background: {c["border"]}; max-height: 1px; min-height: 1px; border: none; }}
+QFrame#ownerBox {{ background: {c["surface_alt"]}; border: 1px solid {c["border"]}; border-radius: {r}px; }}
+QFrame#ownerBox QLabel {{ background: transparent; }}
+QLabel#ownerName {{ font-weight: 700; font-size: {SCALE["title"]}px; }}
+QLabel[role="ownerKey"] {{ color: {c["muted"]}; font-size: {SCALE["caption"]}px; }}
+QLabel[role="ownerValue"] {{ font-size: {SCALE["body"]}px; }}
+QLabel[role="ownerValue"][missing="true"] {{ color: {c["muted"]}; font-style: italic; }}
+QLabel#ownerTech {{ font-family: "{MONO_FAMILIES[0]}", "{MONO_FAMILIES[1]}", "{MONO_FAMILIES[2]}", monospace; font-size: {SCALE["caption"]}px; }}
 QLabel[role="chip"] {{ background: {c["surface_alt"]}; border: 1px solid {c["border"]}; border-radius: 10px; padding: 1px 10px; font-size: {SCALE["caption"]}px; }}
 QLabel[role="warnNote"] {{ color: {c["warn_fg"]}; background: {c["warn_bg"]}; border-radius: {r - 2}px; padding: 4px {sp["sm"]}px; }}
 QPushButton[role="link"] {{ border: 2px solid transparent; background: transparent; color: {c["accent"]}; text-align: left; padding: 2px; text-decoration: underline; font-weight: 600; }}

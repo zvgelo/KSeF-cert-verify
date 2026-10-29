@@ -13,6 +13,7 @@ from typing import Any
 
 import httpx
 from cryptography import x509
+from cryptography.hazmat.primitives.asymmetric import ec
 
 from .core import kod2
 from .core.certificate_classifier import classify
@@ -221,6 +222,8 @@ class Kod2Setup:
     context_type: str = "Nip"
     context_value: str | None = None
     seller_nip: str | None = None
+    invoice_path: Path | None = None  # opcjonalny plik faktury XML (bez niego: test syntetyczny)
+    ec_format: str = "p1363"  # ECDSA: p1363 (rekomendowany) | der
 
 
 def run_kod2_test(
@@ -229,11 +232,18 @@ def run_kod2_test(
     options: VerifyOptions,
     provider: PasswordProvider | None,
     setup: Kod2Setup,
+    online: OnlineSetup | None = None,
 ) -> FileReport:
-    """Weryfikacja pary + test podpisu KODU II (dane syntetyczne; link nie jest nigdzie wysyłany)."""
+    """Weryfikacja pary + test podpisu KODU II (dane syntetyczne; link nie jest nigdzie wysyłany).
+
+    Z `online` dodatkowo status w rejestrze KSeF; certyfikatem Offline NIE uwierzytelniamy – bez uprawnionego JWT
+    wynik online to jawne „nieustalony” z wyjaśnieniem (patrz `establish_online`)."""
     cached = CachedPassword(provider)
     try:
-        report = verify_file(cert_path, options, cached, key_path=key_path)
+        if online is not None:
+            report, _session = verify_with_online(cert_path, key_path, options, cached, online)
+        else:
+            report = verify_file(cert_path, options, cached, key_path=key_path)
         if report.error or not report.certificates:
             return report
         try:
@@ -251,20 +261,45 @@ def run_kod2_test(
             return report
         env = setup.environment.upper()
         info, _ = parse_certificate(cert)
+        inv: kod2.InvoiceInfo | None = None
+        if setup.invoice_path is not None:
+            try:
+                inv = kod2.read_invoice(setup.invoice_path)
+            except (ValueError, OSError) as exc:
+                rep.operations["kod2"] = {
+                    "code": "KOD2_INVOICE_INVALID",
+                    "status": "FAIL",
+                    "message": str(exc),
+                }
+                return report
+            if setup.seller_nip and inv.seller_nip and setup.seller_nip != inv.seller_nip:
+                rep.operations["kod2"] = {
+                    "code": "KOD2_SELLER_MISMATCH",
+                    "status": "FAIL",
+                    "message": "NIP sprzedawcy podany przez użytkownika różni się od Podmiot1 w pliku faktury.",
+                }
+                return report
         nip = setup.context_value or info.subject_info.nip or "1111111111"
+        seller = setup.seller_nip or (inv.seller_nip if inv else None) or nip
+        inv_hash = inv.hash_b64url if inv else kod2.invoice_hash()
         try:
-            params = kod2.Kod2Params(
-                env, setup.context_type, nip, setup.seller_nip or nip, serial_hex(cert), kod2.invoice_hash()
-            )
+            params = kod2.Kod2Params(env, setup.context_type, nip, seller, serial_hex(cert), inv_hash)
             params.validate()
         except ValueError as exc:
             rep.operations["kod2"] = {"code": "KOD2_BAD_PARAMS", "status": "FAIL", "message": str(exc)}
             return report
 
-        def action(key: Any) -> str:
+        def action(key: Any) -> tuple[str, str | None]:
             if spki_of_certificate(cert) != _spki_of_key(key):
                 raise SigningError("klucz prywatny nie pasuje do certyfikatu")
-            return kod2.sign_signing_string(key, params.signing_string())
+            text = params.signing_string()
+            primary = kod2.sign_signing_string(key, text, "der" if setup.ec_format == "der" else "p1363")
+            other = None
+            if isinstance(
+                key, ec.EllipticCurvePrivateKey
+            ):  # dowód, że oba kodowania z dokumentacji MF są obsługiwane
+                other = kod2.sign_signing_string(key, text, "p1363" if setup.ec_format == "der" else "der")
+            return primary, other
 
         out = read_private_key(
             key_path, cached, action=action, require_encrypted=options.require_encrypted_key
@@ -277,31 +312,73 @@ def run_kod2_test(
                 "message": f"Nie wykonano podpisu KODU II: {msg}",
             }
             return report
-        url = kod2.build_url(params, out.action_result)
-        ver = kod2.verify_url(url, cert.public_key(), params.serial_hex16)
-        tampered = kod2.Kod2Params(
-            env,
-            setup.context_type,
-            nip,
-            setup.seller_nip or nip,
-            serial_hex(cert),
-            kod2.invoice_hash(b"inna tresc"),
+        signature, other_signature = out.action_result
+        url = kod2.build_url(params, signature)
+
+        def check_link(link: str) -> kod2.Kod2Verification:
+            return kod2.verify_url(
+                link,
+                cert.public_key(),
+                params.serial_hex16,
+                expected_context=(params.context_type, params.context_value),
+                expected_seller_nip=params.seller_nip,
+                expected_invoice_hash=params.invoice_hash_b64url,
+            )
+
+        ver = check_link(url)
+        encodings_ok = ver.valid
+        if other_signature is not None:
+            encodings_ok = encodings_ok and check_link(kod2.build_url(params, other_signature)).valid
+        # zmiana danych (skrót faktury ALBO NIP sprzedawcy) musi unieważnić podpis
+        other_nip = "1111111111" if params.seller_nip != "1111111111" else "5260250995"
+        tampered = {
+            "hash": kod2.Kod2Params(
+                env, setup.context_type, nip, seller, serial_hex(cert), kod2.invoice_hash(b"inna tresc")
+            ),
+            "NIP sprzedawcy": kod2.Kod2Params(
+                env, setup.context_type, nip, other_nip, serial_hex(cert), inv_hash
+            ),
+        }
+        tamper_ok = all(
+            not kod2.verify_url(
+                f"https://{t.signing_string()}/{signature}", cert.public_key(), params.serial_hex16
+            ).valid
+            for t in tampered.values()
         )
-        tamper_url = f"https://{tampered.signing_string()}/{out.action_result}"
-        tamper_ok = not kod2.verify_url(tamper_url, cert.public_key(), params.serial_hex16).valid
+        good = ver.valid and tamper_ok and encodings_ok
         rep.operations["kod2"] = {
-            "code": ver.code if tamper_ok else "KOD2_TAMPER_NOT_DETECTED",
-            "status": "PASS" if ver.valid and tamper_ok else "FAIL",
+            "code": ver.code if (tamper_ok and encodings_ok) else "KOD2_TAMPER_NOT_DETECTED",
+            "status": "PASS" if good else "FAIL",
             "message": ver.message
             + (
-                " Zmiana danych unieważnia podpis (sprawdzone)."
+                " Zmiana skrótu faktury lub NIP sprzedawcy unieważnia podpis (sprawdzone)."
                 if tamper_ok
                 else " UWAGA: zmiana danych nie unieważniła podpisu!"
             ),
+            "kind": "INVOICE_LINK" if inv else "SYNTHETIC_CRYPTO_TEST",
             "environment": env,
-            "synthetic": True,
+            "synthetic": inv is None,
+            "signature_format": ver.encoding,
+            "encodings_verified": ["P1363", "DER"] if other_signature is not None else [ver.encoding],
+            "context": {"type": params.context_type, "value": params.context_value},
+            "seller_nip": params.seller_nip,
+            "serial_number": params.serial_hex16,
+            "invoice_hash": params.invoice_hash_b64url,
             "url": url,
-            "note": "Dane syntetyczne – to nie jest prawdziwa faktura; link NIE może być użyty ani wysłany do KSeF.",
+            "openable": kod2.is_official_url(url) and (env != "PROD" or inv is not None),
+            # status w rejestrze i uprawnienia do wystawienia faktury to dwie różne rzeczy; to drugie sprawdza wyłącznie KSeF
+            "registry_status": rep.online_status,
+            "issuing_authority": {
+                "status": "NOT_VERIFIED",
+                "message": "Uprawnienia wystawcy do wystawienia faktury w kontekście potwierdza dopiero system KSeF po "
+                "otwarciu linku; MF nie udostępnia maszynowego interfejsu tej weryfikacji. Otwarcie strony ani HTTP 200 "
+                "nie jest dowodem autentyczności wystawcy.",
+            },
+            "note": (
+                "Link zawiera skrót prawdziwego pliku faktury; nic nie jest wysyłane do KSeF bez Twojej akcji."
+                if inv
+                else "Syntetyczny test kryptograficzny – dane sztuczne, to nie jest prawdziwa faktura; link NIE może być użyty ani wysłany do KSeF."
+            ),
         }
         return report
     finally:
